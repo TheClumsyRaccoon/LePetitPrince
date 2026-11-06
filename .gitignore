@@ -1,0 +1,18 @@
+# Arduino & PlatformIOo
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+*.tmp
+build/
+
+# Arduino IDE
+*.hex
+*.bin
+*.elf
+
+# OS
+.DS_Store
+Thumbs.db
+
+secrets.h
