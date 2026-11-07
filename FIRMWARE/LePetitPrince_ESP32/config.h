@@ -45,7 +45,7 @@
 #define ADDR_ICM45686   0x68     /* Adresse par défaut (AD0 = GND) */
 #define ADDR_QMC6309    0x7C     /* Magnétomètre QMC6309 */
 
-/* --- 3× INA219 : mesure tension/courant des packs Li-ion --- */
+/* --- 3× INA226 : mesure tension/courant des packs Li-ion --- */
 #define ADDR_INA_G      0x40     /* Pack moteur gauche (5S2P) */
 #define ADDR_INA_D      0x41     /* Pack moteur droit (5S2P) */
 #define ADDR_INA_ELEC   0x42     /* Pack électronique (2S2P) */
