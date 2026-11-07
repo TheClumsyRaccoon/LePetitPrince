@@ -49,6 +49,7 @@
 #define ADDR_INA_G      0x40     /* Pack moteur gauche (5S2P) */
 #define ADDR_INA_D      0x41     /* Pack moteur droit (5S2P) */
 #define ADDR_INA_ELEC   0x42     /* Pack électronique (2S2P) */
+#define SHUNT_INA_OHM   0.002f   /* résistance shunt INA226*/
 
 /* --- BME280 : humidité interne du tube (détection de fuite) --- */
 #define ADDR_BME280     0x77     /* Jumper SDO → VCC (sinon 0x76) */
@@ -93,7 +94,7 @@
  *  7. SEUILS DE SÉCURITÉ
  * ============================================================ */
 #define HUMIDITE_MAX    70.0f    /* %HR */
-#define COURANT_MAX_A   25.0f    /* A */
+#define COURANT_MAX_A   15.0f    /* A */
 
 
 /* ============================================================
