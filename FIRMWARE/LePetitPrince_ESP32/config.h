@@ -11,8 +11,8 @@
 /* ============================================================
  *  1. BUS I2C
  * ============================================================ */
-#define PIN_SDA         21       /* Broche SDA */
-#define PIN_SCL         22       /* Broche SCL  */
+#define PIN_SDA         8       /* Broche SDA */
+#define PIN_SCL         9       /* Broche SCL  */
 #define FREQ_I2C        400000   /* 400 kHz, mode fast I2C */
 
 
@@ -29,16 +29,30 @@
  *  Signal PWM 50 Hz, impulsion 1000-2000 µs
  * Standard des ESC, a modifier si besoin
  * ============================================================ */
-#define PIN_MOTEUR_G    25       /* ESC moteur gauche */
-#define PIN_MOTEUR_D    26       /* ESC moteur droit */
+#define PIN_MOTEUR_G    4       /* ESC moteur gauche */
+#define PIN_MOTEUR_D    5       /* ESC moteur droit */
 #define FREQ_ESC        50       /* Fréquence PWM */
 #define RES_ESC         16       /* Résolution ESC */
 #define ESC_MIN_US      1000     /* Impulsion poussée arrière max (µs) */
 #define ESC_MAX_US      2000     /* Impulsion poussée avant max (µs) */
 
+/* ============================================================
+ *  4. SERVOS
+ * ============================================================ */
+
+#define PIN_SERVO_L     6
+#define PIN_SERVO_R     7
 
 /* ============================================================
- *  4. ADRESSES I2C DES CAPTEURS
+ *  5. STEPPER DU BALLAST 
+ * ============================================================ */
+
+#define PIN_STEP        10
+#define PIN_DIR         11
+#define PIN_EN          12
+
+/* ============================================================
+ *  6. ADRESSES I2C DES CAPTEURS
  * ============================================================ */
 
 /* --- IMU 9 axes : ICM-45686 (accel+gyro) + QMC6309 (magnéto) --- */
@@ -59,7 +73,7 @@
 
 
 /* ============================================================
- *  5. FRÉQUENCES DES TÂCHES FREERTOS
+ *  7. FRÉQUENCES DES TÂCHES FREERTOS
  * ------------------------------------------------------------
  *  Chaque tâche tourne à sa propre cadence
  * (cf Critère de Shannon), valeurs à modifier si besoin
@@ -70,7 +84,7 @@
 
 
 /* ============================================================
- *  6. GAINS PID
+ *  8. GAINS PID
  * ------------------------------------------------------------
  *  KP : proportionnel 
  *  KI : intégral 
@@ -91,14 +105,14 @@
 
 
 /* ============================================================
- *  7. SEUILS DE SÉCURITÉ
+ *  9. SEUILS DE SÉCURITÉ
  * ============================================================ */
 #define HUMIDITE_MAX    70.0f    /* %HR */
 #define COURANT_MAX_A   15.0f    /* A */
 
 
 /* ============================================================
- *  8. VERSION
+ *  10. VERSION
  * ============================================================ */
 #define VERSION_FW      "0.1.0"
 #define NOM_PROJET      "Le Petit Prince"
