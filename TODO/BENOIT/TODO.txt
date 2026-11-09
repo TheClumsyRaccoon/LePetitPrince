@@ -1,0 +1,35 @@
+Demander au prof : IMU 9 axes reçue, ou utiliser le modèle (différent) de la salle ?
+----
+Noter le modèle exact de la carte ESP32-S3
+Noter les GPIO utilisés pour SDA et SCL
+Installer les bibliothèques : ICM45686, Adafruit BME280, MS5837, Adafruit INA2xx, SensorLib
+----
+Scan I2C avec l'ESP32 seul (doit afficher "Rien trouvé")
+Ajouter un capteur à la fois et noter son adresse
+IMU : 
+Magnétomètre : 
+BME280 : 
+MS5837 : 
+INA226 n°1 : 
+INA226 n°2 : 
+INA226 n°3 : 
+Lire le BME280 
+Lire le MS5837
+Tester les INA226 sur une alim ou petite charge, pas sur les moteurs
+
+--
+Souder les composants qui ont des adresse sdoublons pour changer l'adresse
+
+BME280 : mettre SDO à VCC pour passer de 0x76 à 0x77
+ICM-45686 : AD0 à GND = 0x68, AD0 à VCC = 0x69
+INA226 n°1 : A0 et A1 à GND
+INA226 n°2 : A0 à VCC, A1 à GND
+INA226 n°3 : si 0x42 impossible, tester A1 à VCC et A0 à GND (0x44) et changer ADDR_INA_ELEC dans config.h
+Refaire un scan après chaque soudure
+
+---
+
+Téléverser test_imu.ino
+Vérifier cohérence.
+
+----
