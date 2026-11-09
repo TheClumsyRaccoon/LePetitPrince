@@ -1,6 +1,6 @@
 # Le Petit Prince, Robot sous-marin biomimétique
 
-Projet robotique 2025-2026, ARRIGONI Benoît & BERNARD Guillaume.
+Projet robotique 2025-2026, Benoît & Guillaume.
 
 ## Objectif
 Démonstrateur de robot sous-marin autonome inspiré de la raie *Mobula mobular*,
