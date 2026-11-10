@@ -11,7 +11,7 @@ Magnétomètre :
 BME280 : 0x76 c'est un bmp, pas un bme...
 MS5837 : 0x76
 INA226 n°1 : 0x40
-INA226 n°2 : 0x40
+INA226 n°2 : 0x41 après avoir soudé A0 à VCC
 INA226 n°3 : 0x40
 Lire le BME280 
 Lire le MS5837
