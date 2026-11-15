@@ -66,7 +66,7 @@
 #define SHUNT_INA_OHM   0.002f   /* résistance shunt INA226*/
 
 /* --- BME280 : humidité interne du tube (détection de fuite) --- */
-#define ADDR_BME280     0x77     /* Jumper SDO → VCC (sinon 0x76) */
+#define ADDR_BMP280     0x77     /* Jumper SDO → VCC (sinon 0x76) */
 
 /* --- MS5837-30BA : pression extérieure → profondeur --- */
 #define ADDR_MS5837     0x76     /* Adresse fixe du capteur bleu */
