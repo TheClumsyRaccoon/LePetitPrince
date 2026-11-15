@@ -5,7 +5,7 @@
 #include <math.h>
 
 #include <Adafruit_INA2xx.h>
-#include <Adafruit_BME280.h>
+#include <Adafruit_BMP280.h>
 #include <MS5837.h>
 
 
@@ -97,7 +97,7 @@ static Adafruit_INA2xx ina_elec;
 /* ============================================================
  *  CAPTEURS D'ENVIRONNEMENT
  * ============================================================ */
-static Adafruit_BME280 bme;
+static Adafruit_BMP280 bmp;
 static MS5837          ms5837;
 
 
@@ -127,8 +127,8 @@ void sensors_init() {
     ina_droite.setShunt(SHUNT_INA_OHM, COURANT_MAX_A);
     ina_elec.setShunt(SHUNT_INA_OHM, COURANT_MAX_A);
 
-    /* --- BME280 (humidite interne) --- */
-    if (!bme.begin(ADDR_BME280)) Serial.println("[SENS] BME280 absent");
+    /* --- BMP280 (temperature et pression interne) --- */
+    if (!bmp.begin(ADDR_BMP280)) Serial.println("[SENS] BMP280 absent");
 
     /* --- MS5837 (profondeur exterieure) --- */
     ms5837.setModel(MS5837::MS5837_30BA);
@@ -214,7 +214,7 @@ bool sensors_lire_alim(EtatAlim *g, EtatAlim *d, EtatAlim *elec) {
  * ============================================================ */
 bool sensors_lire_env(EtatEnv *e) {
     e->temperature = bme.readTemperature();
-    e->humidite    = bme.readHumidity();
+    e->humidite    = 0.0f;    /* BMP280 : pas de mesure d'humidite (TODO : à changer si BME280 utilisé au final)*/
     e->pression    = bme.readPressure() / 100.0f;   /* Pa vers hPa */
 
     ms5837.read();
