@@ -5,7 +5,7 @@
  *  Lecture des capteurs
  * ------------------------------------------------------------
  *  Regroupe : IMU 9 axes, 3× INA (courant/tension),
- *             BME280 (humidité interne), MS5837 (profondeur).
+ *             BMP280 (humidité interne), MS5837 (profondeur).
  *  Le filtre de Kalman pour fusion est intégré au .cpp.
  * ============================================================
  */
@@ -36,7 +36,7 @@ typedef struct {
 /* ---------- État de l'environnement ---------- */
 typedef struct {
     float temperature; /* °C air interne du tube */
-    float humidite;    /* %HR air interne du tube (fuite) */
+    float humidite;    /* %HR air interne du tube (fuite) (inutile avec le BMP) */
     float pression;    /* hPa pression atmosphérique interne */
     float profondeur;  /* m sous l'eau (via pression extérieure) */
 } EtatEnv;
