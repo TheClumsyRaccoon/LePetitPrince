@@ -8,28 +8,28 @@ Scan I2C avec l'ESP32 seul (doit afficher "Rien trouvé")
 Ajouter un capteur à la fois et noter son adresse
 IMU : 
 Magnétomètre : 
-BME280 : 0x76 c'est un bmp, pas un bme...
+BMP280 : 0x76 c'est un bmp, pas un bme...
 MS5837 : 0x76
 INA226 n°1 : 0x40
 INA226 n°2 : 0x41 après avoir soudé A0 à VCC
-INA226 n°3 : 0x40
-Lire le BME280 
-Lire le MS5837
+INA226 n°3 : 0x40 TODO (en attente de réception)
+Lire le BMP280 OK cohérent 
+Lire le MS5837 OK cohérent
 Tester les INA226 sur une alim ou petite charge, pas sur les moteurs
 
 --
 Souder les composants qui ont des adresse sdoublons pour changer l'adresse
 
-BME280 : mettre SDO à VCC pour passer de 0x76 à 0x77
-ICM-45686 : AD0 à GND = 0x68, AD0 à VCC = 0x69
-INA226 n°1 : A0 et A1 à GND
-INA226 n°2 : A0 à VCC, A1 à GND
-INA226 n°3 : si 0x42 impossible, tester A1 à VCC et A0 à GND (0x44) et changer ADDR_INA_ELEC dans config.h
-Refaire un scan après chaque soudure
+BMP280 : mettre SDO à VCC pour passer de 0x76 à 0x77 TODO
+ICM-45686 : AD0 à GND = 0x68, AD0 à VCC = 0x69 TODO (en attente de réception)
+INA226 n°1 : A0 et A1 à GND OK
+INA226 n°2 : A0 à VCC, A1 à GND OK
+INA226 n°3 : si 0x42 impossible, tester A1 à VCC et A0 à GND (0x44) et changer ADDR_INA_ELEC dans config.h TODO
+ Refaire un scan après chaque soudure
 
 ---
 
-Téléverser test_imu.ino
+Téléverser test_imu.ino TODO (en attente de réception de l'ICM45686)
 Vérifier cohérence.
 
 ----
