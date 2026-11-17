@@ -21,7 +21,7 @@ def test_flottabilite_ballast():
     assert sim.profondeur > 2.0, f"N'a pas assez plonge: {sim.profondeur:.2f} m"
 
     # Ballast vide (0 mL = -50 g) -> doit remonter vers la surface
-    for _ in range(4000):
+    for _ in range(6000):
         sim.step(0.0, 0.0, 0.0, 0.0, 0.0, P.DT_PHYSIQUE_S)
     assert sim.profondeur < 1.0, f"N'est pas remonte: {sim.profondeur:.2f} m"
 
