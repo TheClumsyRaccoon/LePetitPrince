@@ -3,13 +3,13 @@ from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (
     AmbientLight, DirectionalLight, Fog, Geom, GeomNode,
     GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter,
-    NodePath, Vec3, Vec4, WindowProperties
+    NodePath, PerspectiveLens, Texture, Vec3, Vec4, WindowProperties
 )
 import config as P
 
 
 def creer_boite(nom, sx, sy, sz, couleur):
-    fmt = GeomVertexFormat.get_v3n3c4()
+    fmt = GeomVertexFormat.getV3n3c4()
     vdata = GeomVertexData(nom, fmt, Geom.UHStatic)
     vw = GeomVertexWriter(vdata, "vertex")
     nw = GeomVertexWriter(vdata, "normal")
@@ -53,11 +53,11 @@ class SceneSousMarine3D(ShowBase):
         self.disableMouse()
 
         props = WindowProperties()
-        props.setTitle("Le Petit Prince - Simulateur 3D (V3)")
+        props.setTitle("Le Petit Prince - Simulateur 3D")
         props.setSize(1280, 720)
         self.win.requestProperties(props)
 
-        # Tubidité
+        # Turbidité
         couleur_eau = Vec4(0.03, 0.22, 0.36, 1.0)
         self.setBackgroundColor(couleur_eau)
         brouillard = Fog("EauFog")
@@ -69,9 +69,11 @@ class SceneSousMarine3D(ShowBase):
         self._construire_scene()
         self._construire_raie()
         self._construire_cible()
+        self._configurer_camera_embarquee()
 
         # Parametres camera TPS
         self.t_scene = 0.0
+        self.vue_embarquee = False
         self.cam_dist = 3.2
         self.cam_azimut = -140.0
         self.cam_elevation = 22.0
@@ -82,6 +84,10 @@ class SceneSousMarine3D(ShowBase):
         self.accept("mouse1-up", self._fin_drag)
         self.accept("wheel_up", lambda: self._zoom(-0.3))
         self.accept("wheel_down", lambda: self._zoom(0.3))
+        self.accept("v", self.basculer_camera)
+
+    def basculer_camera(self):
+        self.vue_embarquee = not self.vue_embarquee
 
     def _configurer_lumiere(self):
         amb = AmbientLight("ambiante")
@@ -176,6 +182,40 @@ class SceneSousMarine3D(ShowBase):
         queue.setPos(0.0, -0.22, 0.0)
         queue.reparentTo(self.cible_np)
 
+    def _configurer_camera_embarquee(self):
+        """Cree une camera virtuelle hors-ecran fixee sur le nez de la raie (+Y)."""
+        self.cam_w = P.CAM_LARGEUR
+        self.cam_h = P.CAM_HAUTEUR
+        self.tex_embarquee = Texture()
+        self.buf_embarque = self.win.makeTextureBuffer(
+            "CamEmbarquee", self.cam_w, self.cam_h, self.tex_embarquee, to_ram=True
+        )
+        self.buf_embarque.setSort(-100)
+
+        self.cam_robot = self.makeCamera(self.buf_embarque)
+        lens = PerspectiveLens()
+        lens.setFov(P.CAM_FOV_DEG)
+        lens.setNearFar(0.08, 40.0)
+        self.cam_robot.node().setLens(lens)
+
+        # Nez de la raie est sur +Y 
+        self.cam_robot.reparentTo(self.robot_np)
+        self.cam_robot.setPos(0.0, 0.36, 0.0)
+        self.cam_robot.setHpr(0, 0, 0)
+
+    def capturer_frame_bgr(self):
+        """Extrait l'image de la camera virtuelle au format OpenCV (H, W, 3) BGR."""
+        if not self.tex_embarquee.hasRamImage():
+            return np.zeros((self.cam_h, self.cam_w, 3), dtype=np.uint8)
+
+        data = self.tex_embarquee.getRamImage()
+        arr = np.frombuffer(data, dtype=np.uint8)
+        if arr.size != self.cam_w * self.cam_h * 4:
+            return np.zeros((self.cam_h, self.cam_w, 3), dtype=np.uint8)
+
+        img = arr.reshape((self.cam_h, self.cam_w, 4))
+        return np.flipud(img[:, :, :3]).copy()
+
     def maj(self, sim, dt):
         self.t_scene += dt
 
@@ -200,25 +240,31 @@ class SceneSousMarine3D(ShowBase):
         self.cible_np.setHpr(cap_poisson - 90.0, 0, 0)
 
         # Camera TPS (commandée à la souris qui suit la raie
-        if self.souris_drag and self.mouseWatcherNode.hasMouse():
-            mx = self.mouseWatcherNode.getMouseX()
-            my = self.mouseWatcherNode.getMouseY()
-            dx = mx - self.derniere_souris[0]
-            dy = my - self.derniere_souris[1]
-            self.cam_azimut -= dx * 120.0
-            self.cam_elevation = float(np.clip(self.cam_elevation - dy * 90.0, -40.0, 85.0))
-            self.derniere_souris = (mx, my)
+        if self.vue_embarquee:
+            self.camera.reparentTo(self.robot_np)
+            self.camera.setPos(0.0, 0.36, 0.04)
+            self.camera.setHpr(0, 0, 0)
+        else:
+            self.camera.reparentTo(self.render)
+            if self.souris_drag and self.mouseWatcherNode.hasMouse():
+                mx = self.mouseWatcherNode.getMouseX()
+                my = self.mouseWatcherNode.getMouseY()
+                dx = mx - self.derniere_souris[0]
+                dy = my - self.derniere_souris[1]
+                self.cam_azimut -= dx * 120.0
+                self.cam_elevation = float(np.clip(self.cam_elevation - dy * 90.0, -40.0, 85.0))
+                self.derniere_souris = (mx, my)
 
-        az = np.radians(self.cam_azimut)
-        el = np.radians(self.cam_elevation)
-        offset = Vec3(
-            self.cam_dist * np.cos(el) * np.cos(az),
-            self.cam_dist * np.cos(el) * np.sin(az),
-            self.cam_dist * np.sin(el)
-        )
-        cible_cam = Vec3(*sim.pos)
-        self.camera.setPos(cible_cam + offset)
-        self.camera.lookAt(cible_cam)
+            az = np.radians(self.cam_azimut)
+            el = np.radians(self.cam_elevation)
+            offset = Vec3(
+                self.cam_dist * np.cos(el) * np.cos(az),
+                self.cam_dist * np.cos(el) * np.sin(az),
+                self.cam_dist * np.sin(el)
+            )
+            cible_cam = Vec3(*sim.pos)
+            self.camera.setPos(cible_cam + offset)
+            self.camera.lookAt(cible_cam)
 
     def _debut_drag(self):
         if self.mouseWatcherNode.hasMouse():
