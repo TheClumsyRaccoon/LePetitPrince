@@ -154,8 +154,8 @@ class ControleurRaie:
         u_cap = self.pid_cap.calculer(self.cap_cible, etat_capteurs["yaw"], dt, erreur_forcee=err_cap)
 
         # Mixage differentiel (ex: si err_cap > 0 : tourner a gauche -> moteur droit > moteur gauche)
-        cmd_g = float(np.clip(u_vit - u_cap, -1.0, 1.0))
-        cmd_d = float(np.clip(u_vit + u_cap, -1.0, 1.0))
+        cmd_g = float(np.clip(u_vit + u_cap, -1.0, 1.0))
+        cmd_d = float(np.clip(u_vit - u_cap, -1.0, 1.0))
 
         # 3. Asservissement vertical (Profondeur -> Ballast + Elevons)
         # err_prof > 0 signifie qu'on veut descendre plus profond
