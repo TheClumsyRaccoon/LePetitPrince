@@ -4,7 +4,7 @@
 MASSE_KG = 4.0
 MASSE_AJOUTEE_KG = (0.8, 1.5, 6.0)  # X avant, Y droite, Z haut, TODO à confirmer par Guillaume (Fusion)
 INERTIE_KG_M2 = (0.12, 0.18, 0.28)  # Ix, Iy, Iz, approximation TODO les simuler sous Fusion
-BRAS_LEVIER_MOTEUR_M = 0.18         # Demi écartement entre propulseurs, TODO à confirmer par Guillaume (Fusion)
+BRAS_LEVIER_MOTEUR_M = 0.2         # Demi écartement entre propulseurs, TODO à confirmer par Guillaume (Fusion)
 
 # Actionneurs (propulseurs, elevons, ballast)
 POUSSEE_MAX_AVANT_N = 27.5          # CF datasheet moteur entre 18-20 V, TODO mesurer en bassin 
