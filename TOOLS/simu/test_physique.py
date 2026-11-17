@@ -6,12 +6,11 @@ from physique import Modele6DDL
 
 def test_equilibre_statique():
     sim = Modele6DDL()
-    for _ in range(1000): 
+    for _ in range(1000):
         sim.step(0.0, 0.0, 0.0, 0.0, P.BALLAST_NEUTRE_ML, P.DT_PHYSIQUE_S)
 
-    assert np.isclose(sim.profondeur, 1.5, atol=1e-3), f"Derive profondeur: {sim.profondeur}"
-    assert np.linalg.norm(sim.vel_body) < 1e-4, "Le robot bouge sans commande"
-    print("[OK] Equilibre statique a 50 mL valide")
+    assert np.isclose(sim.profondeur, 1.5, atol=1e-3), f"Derive profondeur: {sim.profondeur:.4f} m"
+    assert np.linalg.norm(sim.vel_body) < 1e-4, f"Vitesse residuelle: {sim.vel_body}"
 
 
 def test_flottabilite_ballast():
@@ -19,23 +18,54 @@ def test_flottabilite_ballast():
     # Ballast plein (100 mL = +50 g) -> doit plonger
     for _ in range(2000): 
         sim.step(0.0, 0.0, 0.0, 0.0, 100.0, P.DT_PHYSIQUE_S)
-    assert sim.profondeur > 2.0, f"Le robot n'a pas plonge: {sim.profondeur} m"
+    assert sim.profondeur > 2.0, f"N'a pas assez plonge: {sim.profondeur:.2f} m"
 
     # Ballast vide (0 mL = -50 g) -> doit remonter vers la surface
-    for _ in range(4000): 
+    for _ in range(4000):
         sim.step(0.0, 0.0, 0.0, 0.0, 0.0, P.DT_PHYSIQUE_S)
-    assert sim.profondeur < 1.0, f"Le robot n'est pas remonte: {sim.profondeur} m"
-    print("[OK] Flottabilite ballast (plongee et remontee) validee")
+    assert sim.profondeur < 1.0, f"N'est pas remonte: {sim.profondeur:.2f} m"
+
+
+def test_stabilite_pendulaire():
+    sim = Modele6DDL()
+    sim.att[0] = np.radians(30.0)  # Roulis initial de 30 deg
+    for _ in range(2000):
+        sim.step(0.0, 0.0, 0.0, 0.0, P.BALLAST_NEUTRE_ML, P.DT_PHYSIQUE_S)
+    assert abs(sim.att[0]) < np.radians(2.0), f"Roulis non amorti: {np.degrees(sim.att[0]):.2f} deg"
+
 
 def test_vitesse_croisiere():
     sim = Modele6DDL()
     for _ in range(2000):  # Pleine poussee avant pendant 10 s
         sim.step(1.0, 1.0, 0.0, 0.0, P.BALLAST_NEUTRE_ML, P.DT_PHYSIQUE_S)
 
-    # Vitesse theorique d'equilibre : v = sqrt((2 * F_max) / drag_x)
     v_theo = np.sqrt((2.0 * P.POUSSEE_MAX_AVANT_N) / P.TRAINEE_LINEAIRE[0])
-    assert np.isclose(sim.vel_body[0], v_theo, rtol=0.02), f"Vitesse {sim.vel_body[0]} != {v_theo}"
-    print(f"[OK] Vitesse max validee : {sim.vel_body[0]:.2f} m/s (theorie {v_theo:.2f} m/s)")
+    assert np.isclose(sim.vel_body[0], v_theo, rtol=0.02), (
+        f"Vitesse {sim.vel_body[0]:.2f} m/s != theorie {v_theo:.2f} m/s"
+    )
+
+
+def executer_batterie_tests():
+    tests = [
+        ("Equilibre statique (50 mL)", test_equilibre_statique),
+        ("Flottabilite ballast (plongee/remontee)", test_flottabilite_ballast),
+        ("Rappel pendulaire passif", test_stabilite_pendulaire),
+        ("Vitesse limite en croisiere", test_vitesse_croisiere),
+    ]
+
+    reussis = 0
+    print("=== Lancement des tests unitaires physique ===")
+    for nom, fn in tests:
+        try:
+            fn()
+            print(f"[OK]    {nom}")
+            reussis += 1
+        except AssertionError as e:
+            print(f"[ECHEC] {nom} -> {e}")
+        except Exception as e:
+            print(f"[ERREUR] {nom} -> {type(e).__name__}: {e}")
+
+    print(f"=== Bilan : {reussis}/{len(tests)} tests valides ===\n")
 
 
 def tracer_essai_boucle_ouverte():
@@ -43,16 +73,13 @@ def tracer_essai_boucle_ouverte():
     dt = P.DT_PHYSIQUE_S
     temps, hist_z, hist_vx, hist_yaw = [], [], [], []
 
-    for i in range(3000):
+    for i in range(3000): 
         t = i * dt
         if t < 5.0:
-            # Ligne droite + ballast plongee
             sim.step(0.5, 0.5, -0.05, -0.05, 70.0, dt)
         elif t < 10.0:
-            # Virage a droite (poussee differentielle) + stabilisation ballast
             sim.step(0.6, 0.3, 0.0, 0.0, 50.0, dt)
         else:
-            # Remontée douce
             sim.step(0.4, 0.4, 0.08, 0.08, 30.0, dt)
 
         temps.append(t)
@@ -79,9 +106,7 @@ def tracer_essai_boucle_ouverte():
     plt.tight_layout()
     plt.show()
 
+
 if __name__ == "__main__":
-    test_equilibre_statique()
-    test_flottabilite_ballast()
-    test_stabilite_pendulaire()
-    test_vitesse_croisiere()
+    executer_batterie_tests()
     tracer_essai_boucle_ouverte()
