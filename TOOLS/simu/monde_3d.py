@@ -89,11 +89,11 @@ class SceneSousMarine3D(ShowBase):
 
         # Prototype robot (un corps + un nez rouge pour verifier l'orientation)
         self.robot_np = self.render.attachNewNode("raie_v1")
-        corps = creer_boite("corps", 0.60, 0.80, 0.10, (0.15, 0.35, 0.55, 1.0))
+        corps = creer_boite("corps", 0.80, 0.60, 0.10, (0.15, 0.35, 0.55, 1.0))
         corps.reparentTo(self.robot_np)
 
         nez = creer_boite("nez", 0.12, 0.12, 0.12, (0.9, 0.2, 0.2, 1.0))
-        nez.setPos(0.32, 0.0, 0.0)
+        nez.setPos(0.0, 0.32, 0.0)  # fix nez sur +Y
         nez.reparentTo(self.robot_np)
 
     def maj(self, sim, dt):
