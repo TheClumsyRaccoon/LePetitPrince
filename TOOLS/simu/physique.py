@@ -38,7 +38,7 @@ class Modele6DDL:
         self.ballast_ml = P.BALLAST_NEUTRE_ML
         self.courant_marin = np.zeros(3, dtype=float)
 
-def _matrice_rotation(self):
+    def _matrice_rotation(self):
         roll, pitch, yaw = self.att
         # Convention : pitch > 0 = nez vers le haut (monte) et pitch < 0 = nez vers le bas (plonge)
         theta = -pitch
