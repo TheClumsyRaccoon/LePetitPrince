@@ -55,7 +55,7 @@ class Modele6DDL:
     def _monde_vers_local(self, vec):
         return self._matrice_rotation().T @ vec
 
-def step(self, cmd_g, cmd_d, cmd_elev_g, cmd_elev_d, cible_ballast_ml, dt):
+    def step(self, cmd_g, cmd_d, cmd_elev_g, cmd_elev_d, cible_ballast_ml, dt):
         # Inertie du 1er ordre des propulseurs et asymetrie marche arriere
         cmd_g = float(np.clip(cmd_g, -1.0, 1.0))
         cmd_d = float(np.clip(cmd_d, -1.0, 1.0))
@@ -133,7 +133,7 @@ def step(self, cmd_g, cmd_d, cmd_elev_g, cmd_elev_d, cible_ballast_ml, dt):
     @property
     def profondeur(self):
         return -self.pos[2]
-        
+
     def lire_capteurs_bruites(self):
         roll, pitch, yaw = self.att
         return {
