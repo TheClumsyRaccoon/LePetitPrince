@@ -8,7 +8,7 @@ Scan I2C avec l'ESP32 seul (doit afficher "Rien trouvé")
 Ajouter un capteur à la fois et noter son adresse
 IMU : 
 Magnétomètre : 
-BMP280 : 0x76 c'est un bmp, pas un bme...
+BMP280 : 0x77 après soudure 
 MS5837 : 0x76
 INA226 n°1 : 0x40
 INA226 n°2 : 0x41 après avoir soudé A0 à VCC
