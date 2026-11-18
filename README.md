@@ -45,7 +45,7 @@ Le robot utilise une propulsion diff√©rentielle, des surfaces portantes articul√
 
 ```bash
 git clone https://github.com/TheClumsyRaccoon/LePetitPrince.git
-cd LePetitPrince/TOOLS/simu_robot
+cd LePetitPrince/TOOLS/simu
 pip install -r requirements.txt
 ```
 
