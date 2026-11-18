@@ -1,127 +1,153 @@
 import cv2
 import numpy as np
 from direct.task import Task
+from panda3d.core import ClockObject
 import config as P
 from physique import Modele6DDL
 from monde_3d import SceneSousMarine3D
 from controleur import ControleurRaie
 
 
-def lancer_simulation():
-    sim = Modele6DDL()
-    scene = SceneSousMarine3D()
-    ctrl = ControleurRaie()
+class Simulation:
+    """Orchestrateur temps reel reliant physique 6-DDL, rendu 3D et controleur."""
 
-    # Shortcuts dans la fenètre 3d
-    def basculer_mode_vision():
-        ctrl.mode_vision = not ctrl.mode_vision
-        etat_str = "VISION AUTONOME" if ctrl.mode_vision else "CAP/PROF FIXES"
+    def __init__(self):
+        self.clock = ClockObject.getGlobalClock()
+        self.sim = Modele6DDL()
+        self.scene = SceneSousMarine3D()
+        self.ctrl = ControleurRaie()
+
+        # Cadences
+        self.dt_phys = P.DT_PHYSIQUE_S              #(200 Hz)
+        self.dt_ctrl = 0.01    #(100 Hz)
+        self.dt_vision = 0.04    # (25 Hz)
+        self.pas_par_ctrl = max(1, round(self.dt_ctrl / self.dt_phys))
+
+        # Etat interne de la boucle
+        self.accum_phys = 0.0
+        self.accum_vision = 0.0
+        self.n_pas = 0
+        self.humidite_sim = 45.0
+
+        self._init_commandes()
+        self._configurer_raccourcis()
+
+    def _init_commandes(self):
+        self.cmd_g = 0.0
+        self.cmd_d = 0.0
+        self.elev_g = 0.0
+        self.elev_d = 0.0
+        self.ballast_cible = P.BALLAST_NEUTRE_ML
+        self.frame_annotee = np.zeros((P.CAM_HAUTEUR, P.CAM_LARGEUR, 3), dtype=np.uint8)
+
+    def _configurer_raccourcis(self):
+        self.scene.accept("m", self.basculer_mode_vision)
+        self.scene.accept("f", self.basculer_fuite)
+        self.scene.accept("r", self.reinitialiser)
+
+    def basculer_mode_vision(self):
+        self.ctrl.mode_vision = not self.ctrl.mode_vision
+        etat_str = "VISION AUTONOME" if self.ctrl.mode_vision else "CONSIGNES FIXES"
         print(f"[SIMU] Mode de pilotage : {etat_str}")
 
-    def reinitialiser_robot():
-        nonlocal sim
-        sim = Modele6DDL()
-        ctrl.pid_vitesse.reset()
-        ctrl.pid_cap.reset()
-        ctrl.pid_profondeur.reset()
-        print("[SIMU] Position et regulateurs reinitialises.")
+    def basculer_fuite(self):
+        self.humidite_sim = 85.0 if self.humidite_sim < 70.0 else 45.0
+        print(f"[SIMU] Humidite interne simulee : {self.humidite_sim:.0f} %HR")
 
-    scene.accept("m", basculer_mode_vision)
-    scene.accept("r", reinitialiser_robot)
+    def reinitialiser(self):
+        self.sim = Modele6DDL()
+        self.ctrl = ControleurRaie()
+        self.accum_phys = 0.0
+        self.accum_vision = 0.0
+        self.n_pas = 0
+        self.humidite_sim = 45.0
+        self._init_commandes()
+        print("[SIMU] Simulation, consignes et actionneurs reinitialises.")
 
-    print("=== Simulateur 3D 6-DDL — Le Petit Prince ===")
-    print("  Souris (clic gauche + glisser / molette) : camera orbitale / zoom")
-    print("  [V] : basculer vue externe / vue nez embarquee")
-    print("  [M] : basculer mode Vision Autonome / Consigne Fixe")
-    print("  [R] : reinitialiser la position de la raie")
-    print("  [Q] (dans la fenetre OpenCV) : quitter")
+    def lire_capteurs(self):
+        return {
+            "vx": self.sim.vel_body[0],
+            "yaw": self.sim.att[2],
+            "profondeur": self.sim.profondeur,
+            "humidite": self.humidite_sim,
+        }
 
-    # Dernieres commandes actionneurs
-    cmd_g, cmd_d = 0.0, 0.0
-    elev_g, elev_d = 0.0, 0.0
-    ballast_cible = P.BALLAST_NEUTRE_ML
+    def _incruster_data(self, frame):
+        mode_txt = "AUTO (VISION)" if self.ctrl.mode_vision else "MANUEL (FIXE)"
+        cv2.putText(
+            frame,
+            f"{mode_txt} | Prof: {self.sim.profondeur:.2f}m (cible {self.ctrl.profondeur_cible:.2f}m)",
+            (10, P.CAM_HAUTEUR - 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
+        cv2.putText(
+            frame,
+            f"Vit: {self.sim.vel_body[0]:.2f}m/s | Cap: {np.degrees(self.sim.att[2]):.0f} deg | Bal: {self.sim.ballast_ml:.0f}mL",
+            (10, P.CAM_HAUTEUR - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (200, 255, 200),
+            1,
+        )
 
-    accum_ctrl = 0.0
-    accum_vision = 0.0
-    dt_ctrl = 1.0 / P.FREQ_CONTROLE_HZ      # 100 Hz
-    dt_vision = 1.0 / P.FREQ_VISION_HZ      # 25 Hz
-    frame_annotee = np.zeros((P.CAM_HAUTEUR, P.CAM_LARGEUR, 3), dtype=np.uint8)
+    def _pas_simulation(self, task):
+        dt = min(self.clock.getDt(), 0.05)
 
-    def boucle_principale(task):
-        nonlocal cmd_g, cmd_d, elev_g, elev_d, ballast_cible
-        nonlocal accum_ctrl, accum_vision, frame_annotee
+        # 1. Boucle physique (200 Hz) + controle PID (100 Hz)
+        self.accum_phys += dt
+        while self.accum_phys >= self.dt_phys:
+            if self.n_pas % self.pas_par_ctrl == 0:
+                (
+                    self.cmd_g,
+                    self.cmd_d,
+                    self.elev_g,
+                    self.elev_d,
+                    self.ballast_cible,
+                ) = self.ctrl.calculer_commandes(self.lire_capteurs(), self.dt_ctrl)
 
-        dt = min(globalClock.getDt(), 0.05)
-
-        # 1. Integration physique (200 Hz)
-        nb_pas = max(1, int(round(dt / P.DT_PHYSIQUE_S)))
-        dt_sub = dt / nb_pas
-        for _ in range(nb_pas):
-            sim.step(cmd_g, cmd_d, elev_g, elev_d, ballast_cible, dt_sub)
-
-        # 2. Mise à jour du rendu 3D et de la caméra embarquée
-        scene.maj(sim, dt)
-
-        # 3. Boucle vision OpenCV (25 Hz)
-        accum_vision += dt
-        if accum_vision >= dt_vision:
-            frame_bgr = scene.capturer_frame_bgr()
-            etat_capteurs = {
-                "vx": sim.vel_body[0],
-                "yaw": sim.att[2],
-                "profondeur": sim.profondeur,
-                "humidite": 45.0,
-            }
-            frame_annotee = ctrl.maj_consignes_vision(frame_bgr, etat_capteurs, accum_vision)
-
-            # Incrustation data sur le retour camera
-            mode_txt = "AUTO (VISION)" if ctrl.mode_vision else "MANUEL (FIXE)"
-            cv2.putText(
-                frame_annotee,
-                f"{mode_txt} | Prof: {sim.profondeur:.2f}m (cible {ctrl.profondeur_cible:.2f}m)",
-                (10, P.CAM_HAUTEUR - 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
+            self.sim.step(
+                self.cmd_g, self.cmd_d, self.elev_g, self.elev_d, self.ballast_cible, self.dt_phys
             )
-            cv2.putText(
-                frame_annotee,
-                f"Vit: {sim.vel_body[0]:.2f}m/s | Cap: {np.degrees(sim.att[2]):.0f} deg | Bal: {sim.ballast_ml:.0f}mL",
-                (10, P.CAM_HAUTEUR - 12),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (200, 255, 200),
-                1,
-            )
-            accum_vision = 0.0
+            self.accum_phys -= self.dt_phys
+            self.n_pas += 1
 
-        # 4. Boucle d'asservissement PID (100 Hz)
-        accum_ctrl += dt
-        while accum_ctrl >= dt_ctrl:
-            etat_capteurs = {
-                "vx": sim.vel_body[0],
-                "yaw": sim.att[2],
-                "profondeur": sim.profondeur,
-                "humidite": 45.0,
-            }
-            cmd_g, cmd_d, elev_g, elev_d, ballast_cible = ctrl.calculer_commandes(
-                etat_capteurs, dt_ctrl
-            )
-            accum_ctrl -= dt_ctrl
+        # 2. Rendu 3D Panda3D
+        self.scene.maj(self.sim, dt)
 
-        # Affichage de la fenetre OpenCV
-        cv2.imshow("Vision Embarquee - Le Petit Prince", frame_annotee)
+        # 3. Boucle vision OpenCV (25Hz)
+        self.accum_vision += dt
+        if self.accum_vision >= self.dt_vision:
+            frame_bgr = self.scene.capturer_frame_bgr()
+            self.frame_annotee = self.ctrl.maj_consignes_vision(
+                frame_bgr, self.lire_capteurs(), self.dt_vision
+            )
+            self._incruster_data(self.frame_annotee)
+            cv2.imshow("Vision Embarquee - Le Petit Prince", self.frame_annotee)
+            self.accum_vision -= self.dt_vision
+
+        # 4. Gestion shortcut fenètre OpenCV
         if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
             cv2.destroyAllWindows()
-            scene.userExit()
+            self.scene.userExit()
             return Task.done
 
         return Task.cont
 
-    scene.taskMgr.add(boucle_principale, "boucle_simulation_complete")
-    scene.run()
+    def lancer(self):
+        print("=== Simulateur 3D 6-DDL — Le Petit Prince ===")
+        print("  Souris (clic gauche + glisser / molette) : camera orbitale / zoom")
+        print("  [V] : basculer vue externe / vue nez embarquee")
+        print("  [M] : basculer mode Vision Autonome / Consigne Fixe")
+        print("  [F] : simuler une fuite d'eau (>70% HR)")
+        print("  [R] : reinitialiser la simulation")
+        print("  [Q] (fenetre OpenCV) : quitter")
+
+        self.scene.taskMgr.add(self._pas_simulation, "boucle_simulation")
+        self.scene.run()
 
 
 if __name__ == "__main__":
-    lancer_simulation()
+    Simulation().lancer()
