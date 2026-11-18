@@ -175,7 +175,7 @@ Le robot utilise une propulsion diff√©rentielle, des surfaces portantes articul√
 
 {BT}bash
 git clone https://github.com/{owner}/{repo}.git
-cd {repo}/TOOLS/simu_robot
+cd {repo}/TOOLS/simu
 pip install -r requirements.txt
 {BT}
 
