@@ -19,4 +19,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+#modèle YOLO
+*.pt
+
 secrets.h
