@@ -1,6 +1,14 @@
+from pathlib import Path
+import time
 import cv2
 import numpy as np
 import config as P
+
+try:
+    from ultralytics import YOLO
+    ULTRALYTICS_DISPO = True
+except ImportError:
+    ULTRALYTICS_DISPO = False
 
 
 class Pid:
@@ -44,20 +52,114 @@ class Pid:
 
 
 class DetecteurCibleVision:
-    """Simulation du traitement OpenCV embarque sur la Raspberry Pi 5"""
+    """Simulation du traitement OpenCV embarque sur la Raspberry Pi 5 (YOLOv8 OBSEA + secours HSV)"""
 
-    def __init__(self):
-        # Plage HSV pour le poisson cible orange vif
+    def __init__(
+        self,
+        chemin_poids="weights/yolov8x_21sp_5364img.pt",
+        conf_seuil=0.25,
+        taille_entree=224,
+    ):
+        # Plage HSV de secours pour le poisson cible orange vif
         self.hsv_min = np.array([5, 130, 100], dtype=np.uint8)
         self.hsv_max = np.array([22, 255, 255], dtype=np.uint8)
 
+        # Parametres YOLOv8 OBSEA (Ultralytics)
+        self.conf_seuil = conf_seuil
+        self.taille_entree = taille_entree
+        self.modele = None
+        self.cible_precedente = None
+
+        dossier = Path(__file__).resolve().parent
+        p_weights = dossier / chemin_poids
+
+        if not ULTRALYTICS_DISPO:
+            print("[VISION] Bibliotheque 'ultralytics' absente (pip install ultralytics) -> repli HSV.")
+        elif p_weights.exists():
+            self.modele = YOLO(str(p_weights))
+            print(f"[VISION] YOLOv8 OBSEA charge : {p_weights.name}")
+        else:
+            print(f"[VISION] Fichier introuvable : {p_weights} -> repli sur segmentation HSV.")
+
     def analyser(self, frame_bgr):
         """
-        Detecte la cible orange dans l'image BGR.
+        Detecte la cible dans l'image BGR.
         Retourne (trouvee, err_x_norm, err_y_norm, aire_px, frame_annotee).
         err_x_norm dans [-1, +1] (+1 = cible a droite dans l'image)
         err_y_norm dans [-1, +1] (+1 = cible en bas dans l'image)
         """
+        if self.modele is not None:
+            return self._analyser_yolo(frame_bgr)
+        return self._analyser_hsv(frame_bgr)
+
+    def _analyser_yolo(self, frame_bgr):
+        frame_out = frame_bgr.copy()
+        h, w = frame_bgr.shape[:2]
+
+        t0 = time.perf_counter()
+        res = self.modele.predict(
+            frame_bgr,
+            conf=self.conf_seuil,
+            imgsz=self.taille_entree,
+            verbose=False,
+        )[0]
+        dt_yolo_ms = (time.perf_counter() - t0) * 1000.0
+        print(f"[YOLO] Temps inférence : {dt_yolo_ms:.1f} ms ({1000.0 / max(dt_yolo_ms, 1e-3):.1f} FPS)")
+
+        if res.boxes is None or len(res.boxes) == 0:
+            self.cible_precedente = None
+            cv2.putText(frame_out, f"CIBLE : PERDUE ({dt_yolo_ms:.0f} ms)", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            return False, 0.0, 0.0, 0.0, frame_out
+
+        meilleure = None
+        meilleur_score = -1.0
+
+        for box in res.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            espece = self.modele.names.get(cls_id, "fish")
+
+            bw = x2 - x1
+            bh = y2 - y1
+            cx = x1 + bw // 2
+            cy = y1 + bh // 2
+            aire = float(max(1, bw * bh))
+
+            # Autres poissons detectes en cyan avec leur espece
+            cv2.rectangle(frame_out, (x1, y1), (x1 + bw, y1 + bh), (255, 180, 0), 1)
+            cv2.putText(frame_out, f"{espece} {conf:.2f}", (x1, max(15, y1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
+
+            # Continuite spatiale pour eviter de changer de poisson a chaque frame
+            bonus = 1.0
+            if self.cible_precedente is not None:
+                dist = np.hypot(cx - self.cible_precedente[0], cy - self.cible_precedente[1])
+                bonus = 1.0 + 1.5 * np.exp(-dist / 120.0)
+
+            score = aire * conf * bonus
+            if score > meilleur_score:
+                meilleur_score = score
+                meilleure = (x1, y1, bw, bh, cx, cy, aire, conf, espece)
+
+        x, y, bw, bh, cx, cy, aire, conf, espece = meilleure
+        self.cible_precedente = (cx, cy)
+
+        # Erreurs normalisees par rapport au centre de l'image
+        err_x = (cx - (w / 2.0)) / (w / 2.0)
+        err_y = (cy - (h / 2.0)) / (h / 2.0)
+
+        # Annotation visuelle identique a la version HSV
+        cv2.rectangle(frame_out, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+        cv2.circle(frame_out, (cx, cy), 4, (0, 0, 255), -1)
+        cv2.line(frame_out, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
+        cv2.putText(frame_out, f"{espece} ({conf:.2f}) | {dt_yolo_ms:.0f} ms | err=({err_x:+.2f}, {err_y:+.2f})",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+
+        return True, float(err_x), float(err_y), float(aire), frame_out
+
+    def _analyser_hsv(self, frame_bgr):
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
 
