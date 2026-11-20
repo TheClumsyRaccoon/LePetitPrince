@@ -49,6 +49,12 @@ AIRE_CIBLE_MIN_PX = 150
 AIRE_CIBLE_PROCHE_PX = 15000
 AIRE_CIBLE_APPROCHE_PX = 7000
 
+# Parametres guidage visuel (YOLOv8)
+VISION_CONF_SEUIL       = 0.25
+VISION_TAILLE_ENTREE    = 224
+VISION_INTERVALLE_YOLO  = 4
+VISION_RATIO_AIRE_PROCHE = 0.06  # ~6% de l'image (~18 000 px en 640x480)
+
 # Simulation et bassin
 DT_PHYSIQUE_S = 0.005               # Pas de calcul (200 Hz)
 PROFONDEUR_BASSIN_M = 6.0
