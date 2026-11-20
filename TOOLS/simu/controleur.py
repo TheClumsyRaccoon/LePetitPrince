@@ -12,7 +12,7 @@ except ImportError:
 
 
 class Pid:
-    """Regulateur PID avec anti saturation"""
+    """Regulateur PID avec anti-saturation (anti-windup)."""
 
     def __init__(self, kp, ki, kd, sortie_min, sortie_max):
         self.kp = kp
@@ -34,7 +34,6 @@ class Pid:
         erreur = (consigne - mesure) if erreur_forcee is None else erreur_forcee
         self.integrale += erreur * dt
 
-        # Anti saturation par bornage du terme integral
         terme_i = self.ki * self.integrale
         if self.ki > 1e-6:
             if terme_i > self.sortie_max:
@@ -52,51 +51,57 @@ class Pid:
 
 
 class DetecteurCibleVision:
-    """Simulation du traitement OpenCV embarqué sur la Raspberry Pi 5 (YOLOv8 OBSEA + secours HSV)"""
+    """Detection de cible (YOLOv8 OBSEA avec decimation temporelle, secours HSV)."""
 
-    def __init__(
-        self,
-        chemin_poids="weights/yolov8x_21sp_5364img.pt",
-        conf_seuil=0.25,
-        taille_entree=224,
-        intervalle_yolo=4,
-    ):
-        # Plage HSV de secours pour le poisson cible orange vif
+    def __init__(self, chemin_poids="weights/yolov8x_21sp_5364img.pt"):
         self.hsv_min = np.array([5, 130, 100], dtype=np.uint8)
         self.hsv_max = np.array([22, 255, 255], dtype=np.uint8)
 
-        # Parametres YOLOv8 OBSEA (Ultralytics)
-        self.conf_seuil = conf_seuil
-        self.taille_entree = taille_entree
+        self.conf_seuil = P.VISION_CONF_SEUIL
+        self.taille_entree = P.VISION_TAILLE_ENTREE
+        self.intervalle_yolo = max(1, int(P.VISION_INTERVALLE_YOLO))
+
         self.modele = None
         self.cible_precedente = None
         self.etat_prec = None
+        self.derniere_boite = None
+        self.compteur_frames = 0
+        self.passes_manquees = 0
         self.vx_norm = 0.0
         self.taux_aire = 0.0
 
-        # Decimation temporelle de YOLO
-        self.intervalle_yolo = max(1, int(intervalle_yolo))
-        self.compteur_frames = 0
-        self.derniere_boite = None
-
-        dossier = Path(__file__).resolve().parent
-        p_weights = dossier / chemin_poids
-
+        p_weights = Path(__file__).resolve().parent / chemin_poids
         if not ULTRALYTICS_DISPO:
-            print("[VISION] Bibliotheque 'ultralytics' absente (pip install ultralytics) -> repli HSV.")
+            print("[VISION] ultralytics absent -> repli HSV.")
         elif p_weights.exists():
             self.modele = YOLO(str(p_weights))
-            print(f"[VISION] YOLOv8 OBSEA charge : {p_weights.name} (1 frame / {self.intervalle_yolo})")
+            print(f"[VISION] YOLOv8 charge : {p_weights.name} (1 frame / {self.intervalle_yolo})")
         else:
-            print(f"[VISION] Fichier introuvable : {p_weights} -> repli sur segmentation HSV.")
+            print(f"[VISION] Poids introuvables ({p_weights}) -> repli HSV.")
+
+    def _reset_suivi(self):
+        self.cible_precedente = None
+        self.etat_prec = None
+        self.derniere_boite = None
+        self.passes_manquees = 0
+        self.vx_norm = 0.0
+        self.taux_aire = 0.0
+
+    @staticmethod
+    def _erreurs_norm(cx, cy, w, h):
+        err_x = (cx - w * 0.5) / (w * 0.5)
+        err_y = (cy - h * 0.5) / (h * 0.5)
+        return float(err_x), float(err_y)
+
+    def _annoter_cible(self, frame, x, y, bw, bh, cx, cy, texte, couleur=(0, 255, 0)):
+        h, w = frame.shape[:2]
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), couleur, 2)
+        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+        cv2.line(frame, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
+        cv2.putText(frame, texte, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, couleur, 2)
 
     def analyser(self, frame_bgr):
-        """
-        Detecte la cible dans l'image BGR.
-        Retourne (trouvee, err_x_norm, err_y_norm, aire_px, frame_annotee).
-        err_x_norm dans [-1, +1] (+1 = cible a droite dans l'image)
-        err_y_norm dans [-1, +1] (+1 = cible en bas dans l'image)
-        """
+        """Retourne (trouvee, err_x_norm, err_y_norm, ratio_aire, frame_annotee)."""
         if self.modele is None:
             return self._analyser_hsv(frame_bgr)
 
@@ -110,6 +115,7 @@ class DetecteurCibleVision:
     def _analyser_yolo(self, frame_bgr):
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
+        aire_image = float(max(1, w * h))
 
         t0 = time.perf_counter()
         res = self.modele.predict(
@@ -118,40 +124,35 @@ class DetecteurCibleVision:
             imgsz=self.taille_entree,
             verbose=False,
         )[0]
-        dt_yolo_ms = (time.perf_counter() - t0) * 1000.0
-        print(f"[YOLO] Temps inférence : {dt_yolo_ms:.1f} ms ({1000.0 / max(dt_yolo_ms, 1e-3):.1f} FPS)")
+        dt_ms = (time.perf_counter() - t0) * 1000.0
 
         if res.boxes is None or len(res.boxes) == 0:
-            self.cible_precedente = None
-            self.etat_prec = None
-            self.derniere_boite = None
-            self.vx_norm = 0.0
-            self.taux_aire = 0.0
-            cv2.putText(frame_out, f"CIBLE : PERDUE ({dt_yolo_ms:.0f} ms)", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            self.passes_manquees += 1
+            if self.passes_manquees <= 2 and self.derniere_boite is not None:
+                return self._reutiliser_derniere_detection(frame_bgr)
+            self._reset_suivi()
+            cv2.putText(frame_out, f"CIBLE : PERDUE ({dt_ms:.0f} ms)", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
             return False, 0.0, 0.0, 0.0, frame_out
 
+        self.passes_manquees = 0
         meilleure = None
         meilleur_score = -1.0
 
         for box in res.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            espece = self.modele.names.get(cls_id, "fish")
+            espece = self.modele.names.get(int(box.cls[0]), "fish")
 
-            bw = x2 - x1
-            bh = y2 - y1
-            cx = x1 + bw // 2
-            cy = y1 + bh // 2
+            bw, bh = x2 - x1, y2 - y1
+            cx, cy = x1 + bw // 2, y1 + bh // 2
             aire = float(max(1, bw * bh))
 
-            # Autres poissons detectes en cyan avec leur espece
-            cv2.rectangle(frame_out, (x1, y1), (x1 + bw, y1 + bh), (255, 180, 0), 1)
+            cv2.rectangle(frame_out, (x1, y1), (x2, y2), (255, 180, 0), 1)
             cv2.putText(frame_out, f"{espece} {conf:.2f}", (x1, max(15, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
 
-            # Continuite spatiale pour eviter de changer de poisson a chaque frame
+            # Bonus de continuite spatiale pour rester verrouille sur la meme cible
             bonus = 1.0
             if self.cible_precedente is not None:
                 dist = np.hypot(cx - self.cible_precedente[0], cy - self.cible_precedente[1])
@@ -166,104 +167,70 @@ class DetecteurCibleVision:
         self.cible_precedente = (cx, cy)
         self.derniere_boite = meilleure
 
-        # Erreurs normalisees par rapport au centre de l'image
-        err_x = (cx - (w / 2.0)) / (w / 2.0)
-        err_y = (cy - (h / 2.0)) / (h / 2.0)
+        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
 
         maintenant = time.perf_counter()
         self.vx_norm = 0.0
         self.taux_aire = 0.0
-
         if self.etat_prec is not None:
-            cx_p, cy_p, aire_p, t_p = self.etat_prec
+            cx_p, _, aire_p, t_p = self.etat_prec
             dt_obs = maintenant - t_p
             if dt_obs > 1e-3:
-                self.vx_norm = ((cx - cx_p) / (w / 2.0)) / dt_obs
+                self.vx_norm = ((cx - cx_p) / (w * 0.5)) / dt_obs
                 self.taux_aire = ((aire - aire_p) / max(aire_p, 1.0)) / dt_obs
 
         self.etat_prec = (cx, cy, aire, maintenant)
 
-        # Annotation visuelle
-        cv2.rectangle(frame_out, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-        cv2.circle(frame_out, (cx, cy), 4, (0, 0, 255), -1)
-        cv2.line(frame_out, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
-        cv2.putText(
-            frame_out,
-            f"{espece} ({conf:.2f}) | {dt_yolo_ms:.0f}ms | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})",
-            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 0), 2
-        )
-
-        return True, float(err_x), float(err_y), float(aire), frame_out
+        label = f"{espece} ({conf:.2f}) | {dt_ms:.0f}ms | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
+        self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 255, 0))
+        return True, err_x, err_y, aire / aire_image, frame_out
 
     def _reutiliser_derniere_detection(self, frame_bgr):
-        """Reaffiche la derniere boite YOLO connue sur les frames intermediaires."""
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
+        aire_image = float(max(1, w * h))
 
         if self.derniere_boite is None:
             cv2.putText(frame_out, "CIBLE : PERDUE (Cache)", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
             return False, 0.0, 0.0, 0.0, frame_out
 
         x, y, bw, bh, cx, cy, aire, conf, espece = self.derniere_boite
-        err_x = (cx - (w / 2.0)) / (w / 2.0)
-        err_y = (cy - (h / 2.0)) / (h / 2.0)
+        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
 
-        cv2.rectangle(frame_out, (x, y), (x + bw, y + bh), (0, 220, 180), 2)
-        cv2.circle(frame_out, (cx, cy), 4, (0, 0, 255), -1)
-        cv2.line(frame_out, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
-        cv2.putText(
-            frame_out,
-            f"{espece} ({conf:.2f}) [CACHE] | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})",
-            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 220, 180), 2
-        )
-
-        return True, float(err_x), float(err_y), float(aire), frame_out
+        label = f"{espece} ({conf:.2f}) [CACHE] | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
+        self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 220, 180))
+        return True, err_x, err_y, aire / aire_image, frame_out
 
     def _analyser_hsv(self, frame_bgr):
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
+        aire_image = float(max(1, w * h))
 
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         masque = cv2.inRange(hsv, self.hsv_min, self.hsv_max)
-
-        # Nettoyage morpho
-        noyau = np.ones((5, 5), np.uint8)
-        masque = cv2.morphologyEx(masque, cv2.MORPH_OPEN, noyau)
+        masque = cv2.morphologyEx(masque, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
         contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            self.etat_prec = None
-            self.vx_norm = 0.0
-            self.taux_aire = 0.0
-            cv2.putText(frame_out, "CIBLE : PERDUE (Recherche)", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            self._reset_suivi()
+            cv2.putText(frame_out, "CIBLE : PERDUE (HSV)", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
             return False, 0.0, 0.0, 0.0, frame_out
 
         c_max = max(contours, key=cv2.contourArea)
-        aire = cv2.contourArea(c_max)
+        aire = float(cv2.contourArea(c_max))
         if aire < 80.0:
-            self.etat_prec = None
-            self.vx_norm = 0.0
-            self.taux_aire = 0.0
+            self._reset_suivi()
             return False, 0.0, 0.0, 0.0, frame_out
 
         x, y, bw, bh = cv2.boundingRect(c_max)
-        cx = x + bw // 2
-        cy = y + bh // 2
+        cx, cy = x + bw // 2, y + bh // 2
+        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
 
-        # Erreurs normalisees par rapport au centre de l'image
-        err_x = (cx - (w / 2.0)) / (w / 2.0)
-        err_y = (cy - (h / 2.0)) / (h / 2.0)
-
-        # Annotation visuel
-        cv2.rectangle(frame_out, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-        cv2.circle(frame_out, (cx, cy), 4, (0, 0, 255), -1)
-        cv2.line(frame_out, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
-        cv2.putText(frame_out, f"CIBLE OK | err=({err_x:+.2f}, {err_y:+.2f}) | aire={int(aire)}",
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-
-        return True, float(err_x), float(err_y), float(aire), frame_out
+        label = f"CIBLE HSV | err=({err_x:+.2f}, {err_y:+.2f}) | aire={int(aire)}"
+        self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 255, 0))
+        return True, err_x, err_y, aire / aire_image, frame_out
 
 
 class ControleurRaie:
@@ -272,20 +239,19 @@ class ControleurRaie:
     def __init__(self):
         self.vision = DetecteurCibleVision()
 
-        # Regulateurs bas niveau
-        self.pid_vitesse = Pid(0.60, 0.15, 0.02, -1.0, 1.0)
-        self.pid_cap = Pid(0.85, 0.08, 0.12, -0.55, 0.55)
-        self.pid_profondeur = Pid(1.10, 0.12, 0.35, -1.0, 1.0)
+        # Parametres PID charges depuis config.py : (Kp, Ki, Kd, sortie_min, sortie_max)
+        self.pid_vitesse = Pid(*P.PID_VITESSE)
+        self.pid_cap = Pid(*P.PID_CAP)
+        self.pid_profondeur = Pid(*P.PID_PROF)
 
-        # Consignes
         self.mode_vision = True
         self.vitesse_cible = 0.55
         self.cap_cible = 0.0
         self.profondeur_cible = 1.8
 
     def maj_consignes_vision(self, frame_bgr, etat_capteurs, dt):
-        """Met a jour cap_cible et profondeur_cible a partir de la caméra"""
-        trouvee, err_x, err_y, aire, frame_annotee = self.vision.analyser(frame_bgr)
+        """Met a jour les consignes de cap, profondeur et vitesse depuis la camera."""
+        trouvee, err_x, err_y, ratio_aire, frame_annotee = self.vision.analyser(frame_bgr)
 
         if not self.mode_vision:
             return frame_annotee
@@ -294,54 +260,41 @@ class ControleurRaie:
         prof_mes = etat_capteurs["profondeur"]
 
         if trouvee:
-            # Anticipation horizontale :
             err_x_pred = err_x + 0.20 * self.vision.vx_norm
             self.cap_cible = (yaw_mes - 0.65 * err_x_pred + np.pi) % (2.0 * np.pi) - np.pi
-
-            # Si la cible est en bas de l'image (err_y > 0), on descend plus profond
             self.profondeur_cible = float(np.clip(
                 prof_mes + 0.8 * err_y, 0.3, P.PROFONDEUR_BASSIN_M - 0.4
             ))
 
-            # Modulation de la vitesse selon la distance (aire) et le rapprochement (taux_aire)
-            if aire > 18000 or self.vision.taux_aire > 0.35:
-                self.vitesse_cible = 0.20   # Freinage si tres proche ou approche rapide
+            if ratio_aire > P.VISION_RATIO_AIRE_PROCHE or self.vision.taux_aire > 0.35:
+                self.vitesse_cible = 0.20
             elif self.vision.taux_aire < -0.35:
-                self.vitesse_cible = 0.75   # Acceleration si le poisson s'eloigne
+                self.vitesse_cible = 0.75
             else:
-                self.vitesse_cible = 0.55   # Croisiere normale
+                self.vitesse_cible = 0.55
         else:
-            # Mode recherche : balayage lent en lacet a profondeur constante
-            self.cap_cible = (yaw_mes + 0.35 * dt + np.pi) % (2.0 * np.pi) - np.pi
+            # Integration continue du cap cible pour balayer sur 360 deg
+            self.cap_cible = (self.cap_cible + 0.35 * dt + np.pi) % (2.0 * np.pi) - np.pi
             self.vitesse_cible = 0.35
 
         return frame_annotee
 
     def calculer_commandes(self, etat_capteurs, dt):
-        """Calcule les sorties actionneurs (100 Hz) : moteurs, elevons, ballast."""
-        # Securite fuite (en supposant que le bmp280 soit remplacé'
+        """Calcule les commandes actionneurs : moteurs, elevons, ballast."""
         if etat_capteurs["humidite"] > 70.0:
             return 0.0, 0.0, 0.35, 0.35, 0.0
 
-        # 1. Asservissement longitudinal (Vitesse)
         u_vit = self.pid_vitesse.calculer(self.vitesse_cible, etat_capteurs["vx"], dt)
 
-        # 2. Asservissement directionnel (Cap / Yaw)
         err_cap = (self.cap_cible - etat_capteurs["yaw"] + np.pi) % (2.0 * np.pi) - np.pi
         u_cap = self.pid_cap.calculer(self.cap_cible, etat_capteurs["yaw"], dt, erreur_forcee=err_cap)
 
-        # Mixage differentiel (ex: si err_cap > 0 : tourner a gauche -> moteur droit > moteur gauche)
+        # Mixage differentiel : u_cap > 0 applique +u_cap a gauche et -u_cap a droite
         cmd_g = float(np.clip(u_vit + u_cap, -1.0, 1.0))
         cmd_d = float(np.clip(u_vit - u_cap, -1.0, 1.0))
 
-        # 3. Asservissement vertical (Profondeur -> Ballast + Elevons)
-        # err_prof > 0 signifie qu'on veut descendre plus profond
         u_prof = self.pid_profondeur.calculer(self.profondeur_cible, etat_capteurs["profondeur"], dt)
-
-        # Ballast statique : > 50 mL pour plonger, < 50 mL pour remonter
         cible_ballast = float(np.clip(P.BALLAST_NEUTRE_ML + u_prof * 50.0, 0.0, 100.0))
-
-        # Elevons dynamiques : < 0 pour piquer du nez (descendre), > 0 pour monter)
         cmd_elevon = float(np.clip(-u_prof * 0.35, -0.35, 0.35))
 
         return cmd_g, cmd_d, cmd_elevon, cmd_elevon, cible_ballast
