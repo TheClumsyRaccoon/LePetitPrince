@@ -1,7 +1,8 @@
+from pathlib import Path
 import numpy as np
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (
-    AmbientLight, DirectionalLight, Fog, Geom, GeomNode,
+    AmbientLight, DirectionalLight, Filename, Fog, Geom, GeomNode,
     GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter,
     NodePath, PerspectiveLens, Texture, Vec3, Vec4, WindowProperties
 )
@@ -174,13 +175,63 @@ class SceneSousMarine3D(ShowBase):
         prop_d.reparentTo(self.robot_np)
 
     def _construire_cible(self):
-        """Poisson cible mobile orange vif (aligne sur +Y)."""
-        self.cible_np = self.render.attachNewNode("PoissonCible")
-        corps = creer_boite("poisson_corps", 0.10, 0.34, 0.14, (1.0, 0.42, 0.05, 1.0))
-        corps.reparentTo(self.cible_np)
-        queue = creer_boite("poisson_queue", 0.03, 0.12, 0.16, (1.0, 0.65, 0.10, 1.0))
-        queue.setPos(0.0, -0.22, 0.0)
-        queue.reparentTo(self.cible_np)
+        """Genere un nombre aleatoire de poissons a partir de tous les modeles dans assets/."""
+        self.rng = np.random.default_rng()
+        self.poissons = []
+
+        dossier_assets = Path(__file__).resolve().parent / "assets"
+        fichiers_glb = sorted(dossier_assets.glob("*.glb")) if dossier_assets.exists() else []
+
+        nb_poissons = int(self.rng.integers(max(220, len(fichiers_glb)), max(280, len(fichiers_glb) + 5)))
+
+        for idx in range(nb_poissons):
+            racine = self.render.attachNewNode(f"Poisson_{idx}")
+
+            if fichiers_glb:
+                # Garantit que chaque modele .glb de assets/ est utilise au moins une fois
+                fichier = fichiers_glb[idx] if idx < len(fichiers_glb) else self.rng.choice(fichiers_glb)
+                modele = self.loader.loadModel(Filename.fromOsSpecific(str(fichier)))
+                modele.reparentTo(racine)
+
+                p_min, p_max = modele.getTightBounds()
+                taille = p_max - p_min
+                dim_max = max(taille.x, taille.y, taille.z, 1e-6)
+                longueur_cible = float(self.rng.uniform(0.30, 0.55))
+                echelle = longueur_cible / dim_max
+                modele.setScale(echelle)
+                centre = (p_min + p_max) * 0.5 * echelle
+                modele.setPos(-centre)
+            else:
+                corps = creer_boite(f"p_corps_{idx}", 0.10, 0.34, 0.14, (1.0, 0.42, 0.05, 1.0))
+                corps.reparentTo(racine)
+                queue = creer_boite(f"p_queue_{idx}", 0.03, 0.12, 0.16, (1.0, 0.65, 0.10, 1.0))
+                queue.setPos(0.0, -0.22, 0.0)
+                queue.reparentTo(racine)
+
+            pos = np.array([
+                self.rng.uniform(-10.0, 12.0),
+                self.rng.uniform(-10.0, 10.0),
+                self.rng.uniform(-P.PROFONDEUR_BASSIN_M + 0.6, -0.6),
+            ])
+            cap = float(self.rng.uniform(-np.pi, np.pi))
+            racine.setPos(*pos)
+            racine.setHpr(np.degrees(cap) - 90.0, 0, 0)
+
+            self.poissons.append({
+                "np": racine,
+                "pos": pos,
+                "cap": cap,
+                "vitesse": float(self.rng.uniform(0.35, 0.85)),
+                "vitesse_cap": float(self.rng.uniform(-0.4, 0.4)),
+                "vz": 0.0,
+                "timer_virage": float(self.rng.uniform(1.0, 4.0)),
+            })
+
+        print(f"[3D] {len(self.poissons)} poissons charges depuis {len(fichiers_glb)} fichiers .glb")
+        for i, p in enumerate(self.poissons):
+            print(f"  - Poisson {i} en pos={np.round(p['pos'], 2)}")
+        if self.poissons:
+            self.cible_np = self.poissons[0]["np"]
 
     def _configurer_camera_embarquee(self):
         """Cree une camera virtuelle hors-ecran fixee sur le nez de la raie (+Y)."""
@@ -228,16 +279,31 @@ class SceneSousMarine3D(ShowBase):
         self.elevon_g_np.setP(-np.degrees(sim.elevon_g))
         self.elevon_d_np.setP(-np.degrees(sim.elevon_d))
 
-        # Trajectoire circulaire du poisson cible
-        cx = 5.5 + 3.5 * np.cos(0.18 * self.t_scene)
-        cy = 3.5 * np.sin(0.18 * self.t_scene)
-        cz = -2.0 + 0.5 * np.sin(0.35 * self.t_scene)
-        cap_poisson = np.degrees(np.arctan2(
-            3.5 * 0.18 * np.cos(0.18 * self.t_scene),
-            -3.5 * 0.18 * np.sin(0.18 * self.t_scene)
-        ))
-        self.cible_np.setPos(cx, cy, cz)
-        self.cible_np.setHpr(cap_poisson - 90.0, 0, 0)
+        # Deplacement aleatoire des poissons dans le bassin
+        z_min = -P.PROFONDEUR_BASSIN_M + 0.5
+        z_max = -0.5
+        for p in self.poissons:
+            p["timer_virage"] -= dt
+            if p["timer_virage"] <= 0.0:
+                p["vitesse_cap"] = float(self.rng.uniform(-0.7, 0.7))
+                p["vitesse"] = float(self.rng.uniform(0.30, 0.90))
+                p["vz"] = float(self.rng.uniform(-0.18, 0.18))
+                p["timer_virage"] = float(self.rng.uniform(1.5, 4.5))
+
+            # Demi-tour doux a l'approche des parois du bassin
+            if abs(p["pos"][0]) > 15.0 or abs(p["pos"][1]) > 15.0:
+                cap_centre = np.arctan2(-p["pos"][1], -p["pos"][0])
+                err = (cap_centre - p["cap"] + np.pi) % (2.0 * np.pi) - np.pi
+                p["vitesse_cap"] = float(np.clip(1.2 * err, -1.2, 1.2))
+
+            p["cap"] = (p["cap"] + p["vitesse_cap"] * dt + np.pi) % (2.0 * np.pi) - np.pi
+            p["pos"][0] += p["vitesse"] * np.cos(p["cap"]) * dt
+            p["pos"][1] += p["vitesse"] * np.sin(p["cap"]) * dt
+            p["pos"][2] = float(np.clip(p["pos"][2] + p["vz"] * dt, z_min, z_max))
+
+            pitch_p = np.degrees(np.arctan2(p["vz"], max(p["vitesse"], 0.1)))
+            p["np"].setPos(*p["pos"])
+            p["np"].setHpr(np.degrees(p["cap"]) - 90.0, -pitch_p, 0.0)
 
         # Camera TPS (commandée à la souris qui suit la raie
         if self.vue_embarquee:
