@@ -33,3 +33,15 @@ Téléverser test_imu.ino TODO (en attente de réception de l'ICM45686)
 Vérifier cohérence.
 
 ----
+
+
+SIMU :
+
+POur l'instant le robot est "aveugle" pendant al durée d'inférence de YOLO. 
+Prévoir un suivi par calcul sur les aires pendant l'inférence de Yolo (sur un autre thread) pour que le robot puisse continuer à suivre sa cible.
+=> permettrait peut être une moins grande dépendance » un YOLO réccurent (moins d'appel = plus d eressources pour le SLAM)
+
++ implémenter gestion du rapprochement et éloignement (comparaison de la taille des aires entre deux frames)
+idem sur l'estimation du déplacement latéral (ne pas se fier simplement au système d'erreur actuel)
+Implémenter le SLAM...
+
