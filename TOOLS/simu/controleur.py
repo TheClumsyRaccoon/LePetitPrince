@@ -49,9 +49,8 @@ class Pid:
         sortie = (self.kp * erreur) + terme_i + (self.kd * terme_d)
         return float(np.clip(sortie, self.sortie_min, self.sortie_max))
 
-
 class DetecteurCibleVision:
-    """Detection de cible (YOLOv8 OBSEA avec decimation temporelle, secours HSV)."""
+    """Detection de cible (YOLOv8 OBSEA avec diminution des appels + suivi optique, secours HSV)."""
 
     def __init__(self, chemin_poids="weights/yolov8x_21sp_5364img.pt"):
         self.hsv_min = np.array([5, 130, 100], dtype=np.uint8)
@@ -70,12 +69,16 @@ class DetecteurCibleVision:
         self.vx_norm = 0.0
         self.taux_aire = 0.0
 
+        # Etat du suivi optique inter-frames
+        self.gris_prec = None
+        self.points_suivi = None
+
         p_weights = Path(__file__).resolve().parent / chemin_poids
         if not ULTRALYTICS_DISPO:
             print("[VISION] ultralytics absent -> repli HSV.")
         elif p_weights.exists():
             self.modele = YOLO(str(p_weights))
-            print(f"[VISION] YOLOv8 charge : {p_weights.name} (1 frame / {self.intervalle_yolo})")
+            print(f"[VISION] YOLOv8 charge : {p_weights.name} (1 frame / {self.intervalle_yolo} + suivi optique)")
         else:
             print(f"[VISION] Poids introuvables ({p_weights}) -> repli HSV.")
 
@@ -83,6 +86,7 @@ class DetecteurCibleVision:
         self.cible_precedente = None
         self.etat_prec = None
         self.derniere_boite = None
+        self.points_suivi = None
         self.passes_manquees = 0
         self.vx_norm = 0.0
         self.taux_aire = 0.0
@@ -95,24 +99,60 @@ class DetecteurCibleVision:
 
     def _annoter_cible(self, frame, x, y, bw, bh, cx, cy, texte, couleur=(0, 255, 0)):
         h, w = frame.shape[:2]
-        cv2.rectangle(frame, (x, y), (x + bw, y + bh), couleur, 2)
-        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
-        cv2.line(frame, (w // 2, h // 2), (cx, cy), (255, 255, 0), 1)
+        ix, iy, ibw, ibh = int(x), int(y), int(bw), int(bh)
+        icx, icy = int(cx), int(cy)
+        cv2.rectangle(frame, (ix, iy), (ix + ibw, iy + ibh), couleur, 2)
+        cv2.circle(frame, (icx, icy), 4, (0, 0, 255), -1)
+        cv2.line(frame, (w // 2, h // 2), (icx, icy), (255, 255, 0), 1)
         cv2.putText(frame, texte, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, couleur, 2)
+
+    def _init_points_optiques(self, gris, x, y, bw, bh):
+        """Selectionne des points d'interet sur le poisson pour le suivi inter-frames."""
+        h, w = gris.shape
+        x1, y1 = max(0, int(x)), max(0, int(y))
+        x2, y2 = min(w, int(x + bw)), min(h, int(y + bh))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            self.points_suivi = None
+            return
+
+        masque = np.zeros_like(gris)
+        masque[y1:y2, x1:x2] = 255
+        self.points_suivi = cv2.goodFeaturesToTrack(
+            gris, maxCorners=20, qualityLevel=0.05, minDistance=4, mask=masque
+        )
+
+    def _maj_cinematique(self, cx, cy, aire, w):
+        """Met a jour vx_norm et taux_aire a partir de l'observation precedente."""
+        maintenant = time.perf_counter()
+        if self.etat_prec is not None:
+            cx_p, _, aire_p, t_p = self.etat_prec
+            dt_obs = maintenant - t_p
+            if dt_obs > 1e-3:
+                vx_inst = ((cx - cx_p) / (w * 0.5)) / dt_obs
+                taux_inst = ((aire - aire_p) / max(aire_p, 1.0)) / dt_obs
+                # Lissage exponentiel doux pour filtrer le bruit d'estimation
+                self.vx_norm = 0.6 * self.vx_norm + 0.4 * vx_inst
+                self.taux_aire = 0.6 * self.taux_aire + 0.4 * taux_inst
+        self.etat_prec = (cx, cy, aire, maintenant)
 
     def analyser(self, frame_bgr):
         """Retourne (trouvee, err_x_norm, err_y_norm, ratio_aire, frame_annotee)."""
         if self.modele is None:
             return self._analyser_hsv(frame_bgr)
 
+        gris = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         lancer_yolo = (self.compteur_frames % self.intervalle_yolo == 0)
         self.compteur_frames += 1
 
         if lancer_yolo:
-            return self._analyser_yolo(frame_bgr)
-        return self._reutiliser_derniere_detection(frame_bgr)
+            res = self._analyser_yolo(frame_bgr, gris)
+        else:
+            res = self._suivre_entre_yolo(frame_bgr, gris)
 
-    def _analyser_yolo(self, frame_bgr):
+        self.gris_prec = gris
+        return res
+
+    def _analyser_yolo(self, frame_bgr, gris):
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
         aire_image = float(max(1, w * h))
@@ -129,7 +169,7 @@ class DetecteurCibleVision:
         if res.boxes is None or len(res.boxes) == 0:
             self.passes_manquees += 1
             if self.passes_manquees <= 2 and self.derniere_boite is not None:
-                return self._reutiliser_derniere_detection(frame_bgr)
+                return self._suivre_entre_yolo(frame_bgr, gris)
             self._reset_suivi()
             cv2.putText(frame_out, f"CIBLE : PERDUE ({dt_ms:.0f} ms)", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
@@ -144,15 +184,14 @@ class DetecteurCibleVision:
             conf = float(box.conf[0])
             espece = self.modele.names.get(int(box.cls[0]), "fish")
 
-            bw, bh = x2 - x1, y2 - y1
-            cx, cy = x1 + bw // 2, y1 + bh // 2
-            aire = float(max(1, bw * bh))
+            bw, bh = float(x2 - x1), float(y2 - y1)
+            cx, cy = x1 + bw * 0.5, y1 + bh * 0.5
+            aire = max(1.0, bw * bh)
 
             cv2.rectangle(frame_out, (x1, y1), (x2, y2), (255, 180, 0), 1)
             cv2.putText(frame_out, f"{espece} {conf:.2f}", (x1, max(15, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
 
-            # Bonus de continuite spatiale pour rester verrouille sur la meme cible
             bonus = 1.0
             if self.cible_precedente is not None:
                 dist = np.hypot(cx - self.cible_precedente[0], cy - self.cible_precedente[1])
@@ -161,77 +200,70 @@ class DetecteurCibleVision:
             score = aire * conf * bonus
             if score > meilleur_score:
                 meilleur_score = score
-                meilleure = (x1, y1, bw, bh, cx, cy, aire, conf, espece)
+                meilleure = [float(x1), float(y1), bw, bh, cx, cy, aire, conf, espece]
 
         x, y, bw, bh, cx, cy, aire, conf, espece = meilleure
         self.cible_precedente = (cx, cy)
         self.derniere_boite = meilleure
+        self._init_points_optiques(gris, x, y, bw, bh)
+        self._maj_cinematique(cx, cy, aire, w)
 
         err_x, err_y = self._erreurs_norm(cx, cy, w, h)
-
-        maintenant = time.perf_counter()
-        self.vx_norm = 0.0
-        self.taux_aire = 0.0
-        if self.etat_prec is not None:
-            cx_p, _, aire_p, t_p = self.etat_prec
-            dt_obs = maintenant - t_p
-            if dt_obs > 1e-3:
-                self.vx_norm = ((cx - cx_p) / (w * 0.5)) / dt_obs
-                self.taux_aire = ((aire - aire_p) / max(aire_p, 1.0)) / dt_obs
-
-        self.etat_prec = (cx, cy, aire, maintenant)
-
         label = f"{espece} ({conf:.2f}) | {dt_ms:.0f}ms | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
         self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 255, 0))
         return True, err_x, err_y, aire / aire_image, frame_out
 
-    def _reutiliser_derniere_detection(self, frame_bgr):
+    def _suivre_entre_yolo(self, frame_bgr, gris):
+        """Fait glisser la boite et estime la variation d'aire via flux optique."""
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
         aire_image = float(max(1, w * h))
 
         if self.derniere_boite is None:
-            cv2.putText(frame_out, "CIBLE : PERDUE (Cache)", (10, 25),
+            cv2.putText(frame_out, "CIBLE : PERDUE (Suivi)", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
             return False, 0.0, 0.0, 0.0, frame_out
 
         x, y, bw, bh, cx, cy, aire, conf, espece = self.derniere_boite
-        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
 
-        label = f"{espece} ({conf:.2f}) [CACHE] | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
+        if self.gris_prec is not None and self.points_suivi is not None and len(self.points_suivi) >= 3:
+            pts_nouv, statut, _ = cv2.calcOpticalFlowPyrLK(self.gris_prec, gris, self.points_suivi, None)
+            bons_nouv = pts_nouv[statut == 1]
+            bons_anc = self.points_suivi[statut == 1]
+
+            if len(bons_nouv) >= 3:
+                # Translation mediane des points suivis
+                dx, dy = np.median(bons_nouv - bons_anc, axis=0)
+                cx += float(dx)
+                cy += float(dy)
+
+                # Variation d'echelle (expansion / contraction de l'aire)
+                c_anc = np.mean(bons_anc, axis=0)
+                c_nouv = np.mean(bons_nouv, axis=0)
+                r_anc = np.linalg.norm(bons_anc - c_anc, axis=1)
+                r_nouv = np.linalg.norm(bons_nouv - c_nouv, axis=1)
+                valides = r_anc > 2.0
+                if np.any(valides):
+                    echelle = float(np.clip(np.median(r_nouv[valides] / r_anc[valides]), 0.85, 1.15))
+                    bw *= echelle
+                    bh *= echelle
+
+                x = cx - bw * 0.5
+                y = cy - bh * 0.5
+                aire = max(1.0, bw * bh)
+
+                self.derniere_boite = [x, y, bw, bh, cx, cy, aire, conf, espece]
+                self.cible_precedente = (cx, cy)
+                self.points_suivi = bons_nouv.reshape(-1, 1, 2)
+                self._maj_cinematique(cx, cy, aire, w)
+
+                for pt in bons_nouv:
+                    cv2.circle(frame_out, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1)
+
+        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
+        label = f"{espece} ({conf:.2f}) [SUIVI] | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
         self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 220, 180))
         return True, err_x, err_y, aire / aire_image, frame_out
-
-    def _analyser_hsv(self, frame_bgr):
-        frame_out = frame_bgr.copy()
-        h, w = frame_bgr.shape[:2]
-        aire_image = float(max(1, w * h))
-
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        masque = cv2.inRange(hsv, self.hsv_min, self.hsv_max)
-        masque = cv2.morphologyEx(masque, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-
-        contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            self._reset_suivi()
-            cv2.putText(frame_out, "CIBLE : PERDUE (HSV)", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
-            return False, 0.0, 0.0, 0.0, frame_out
-
-        c_max = max(contours, key=cv2.contourArea)
-        aire = float(cv2.contourArea(c_max))
-        if aire < 80.0:
-            self._reset_suivi()
-            return False, 0.0, 0.0, 0.0, frame_out
-
-        x, y, bw, bh = cv2.boundingRect(c_max)
-        cx, cy = x + bw // 2, y + bh // 2
-        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
-
-        label = f"CIBLE HSV | err=({err_x:+.2f}, {err_y:+.2f}) | aire={int(aire)}"
-        self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 255, 0))
-        return True, err_x, err_y, aire / aire_image, frame_out
-
 
 class ControleurRaie:
     """Pilote automatique combinant guidage visuel et regulation 6-DDL."""
