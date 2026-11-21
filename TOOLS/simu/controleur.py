@@ -49,8 +49,9 @@ class Pid:
         sortie = (self.kp * erreur) + terme_i + (self.kd * terme_d)
         return float(np.clip(sortie, self.sortie_min, self.sortie_max))
 
+
 class DetecteurCibleVision:
-    """Detection de cible (YOLOv8 OBSEA avec diminution des appels + suivi optique, secours HSV)."""
+    """Detection de cible (YOLOv8 OBSEA avec decimation temporelle + suivi optique, secours HSV)."""
 
     def __init__(self, chemin_poids="weights/yolov8x_21sp_5364img.pt"):
         self.hsv_min = np.array([5, 130, 100], dtype=np.uint8)
@@ -107,10 +108,11 @@ class DetecteurCibleVision:
         cv2.putText(frame, texte, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, couleur, 2)
 
     def _init_points_optiques(self, gris, x, y, bw, bh):
-        """Selectionne des points d'interet sur le poisson pour le suivi inter-frames."""
+        """Selectionne des points d'interet au coeur du poisson (marge 20%)."""
         h, w = gris.shape
-        x1, y1 = max(0, int(x)), max(0, int(y))
-        x2, y2 = min(w, int(x + bw)), min(h, int(y + bh))
+        mx, my = bw * 0.20, bh * 0.20
+        x1, y1 = max(0, int(x + mx)), max(0, int(y + my))
+        x2, y2 = min(w, int(x + bw - mx)), min(h, int(y + bh - my))
         if x2 - x1 < 8 or y2 - y1 < 8:
             self.points_suivi = None
             return
@@ -166,7 +168,49 @@ class DetecteurCibleVision:
         )[0]
         dt_ms = (time.perf_counter() - t0) * 1000.0
 
-        if res.boxes is None or len(res.boxes) == 0:
+        meilleure = None
+        meilleur_score = -1.0
+
+        if res.boxes is not None:
+            for box in res.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                conf = float(box.conf[0])
+                espece = self.modele.names.get(int(box.cls[0]), "fish")
+
+                bw, bh = float(x2 - x1), float(y2 - y1)
+                cx, cy = x1 + bw * 0.5, y1 + bh * 0.5
+                aire = max(1.0, bw * bh)
+                ratio_boite = aire / aire_image
+
+                # Rejette le bruit minuscule et les faux positifs plein ecran
+                touche_4_bords = (x1 <= 2 and y1 <= 2 and x2 >= w - 2 and y2 >= h - 2)
+                if ratio_boite < 0.001 or touche_4_bords:
+                    continue
+
+                # Coherence d'echelle : evite les sauts d'aire aberrants d'une passe a l'autre
+                if self.derniere_boite is None:
+                    if ratio_boite > 0.55:
+                        continue
+                else:
+                    aire_prec = self.derniere_boite[6]
+                    if aire > 2.5 * aire_prec or aire < 0.3 * aire_prec:
+                        continue
+
+                cv2.rectangle(frame_out, (x1, y1), (x2, y2), (255, 180, 0), 1)
+                cv2.putText(frame_out, f"{espece} {conf:.2f}", (x1, max(15, y1 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
+
+                bonus = 1.0
+                if self.cible_precedente is not None:
+                    dist = np.hypot(cx - self.cible_precedente[0], cy - self.cible_precedente[1])
+                    bonus = 1.0 + 1.5 * np.exp(-dist / 120.0)
+
+                score = aire * conf * bonus
+                if score > meilleur_score:
+                    meilleur_score = score
+                    meilleure = [float(x1), float(y1), bw, bh, cx, cy, aire, conf, espece]
+
+        if meilleure is None:
             self.passes_manquees += 1
             if self.passes_manquees <= 2 and self.derniere_boite is not None:
                 return self._suivre_entre_yolo(frame_bgr, gris)
@@ -176,32 +220,6 @@ class DetecteurCibleVision:
             return False, 0.0, 0.0, 0.0, frame_out
 
         self.passes_manquees = 0
-        meilleure = None
-        meilleur_score = -1.0
-
-        for box in res.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            conf = float(box.conf[0])
-            espece = self.modele.names.get(int(box.cls[0]), "fish")
-
-            bw, bh = float(x2 - x1), float(y2 - y1)
-            cx, cy = x1 + bw * 0.5, y1 + bh * 0.5
-            aire = max(1.0, bw * bh)
-
-            cv2.rectangle(frame_out, (x1, y1), (x2, y2), (255, 180, 0), 1)
-            cv2.putText(frame_out, f"{espece} {conf:.2f}", (x1, max(15, y1 - 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
-
-            bonus = 1.0
-            if self.cible_precedente is not None:
-                dist = np.hypot(cx - self.cible_precedente[0], cy - self.cible_precedente[1])
-                bonus = 1.0 + 1.5 * np.exp(-dist / 120.0)
-
-            score = aire * conf * bonus
-            if score > meilleur_score:
-                meilleur_score = score
-                meilleure = [float(x1), float(y1), bw, bh, cx, cy, aire, conf, espece]
-
         x, y, bw, bh, cx, cy, aire, conf, espece = meilleure
         self.cible_precedente = (cx, cy)
         self.derniere_boite = meilleure
@@ -234,8 +252,8 @@ class DetecteurCibleVision:
             if len(bons_nouv) >= 3:
                 # Translation mediane des points suivis
                 dx, dy = np.median(bons_nouv - bons_anc, axis=0)
-                cx += float(dx)
-                cy += float(dy)
+                cx = float(np.clip(cx + dx, 0.0, w))
+                cy = float(np.clip(cy + dy, 0.0, h))
 
                 # Variation d'echelle (expansion / contraction de l'aire)
                 c_anc = np.mean(bons_anc, axis=0)
@@ -245,8 +263,8 @@ class DetecteurCibleVision:
                 valides = r_anc > 2.0
                 if np.any(valides):
                     echelle = float(np.clip(np.median(r_nouv[valides] / r_anc[valides]), 0.85, 1.15))
-                    bw *= echelle
-                    bh *= echelle
+                    bw = min(w * 0.90, bw * echelle)
+                    bh = min(h * 0.90, bh * echelle)
 
                 x = cx - bw * 0.5
                 y = cy - bh * 0.5
@@ -264,6 +282,37 @@ class DetecteurCibleVision:
         label = f"{espece} ({conf:.2f}) [SUIVI] | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
         self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 220, 180))
         return True, err_x, err_y, aire / aire_image, frame_out
+
+    def _analyser_hsv(self, frame_bgr):
+        frame_out = frame_bgr.copy()
+        h, w = frame_bgr.shape[:2]
+        aire_image = float(max(1, w * h))
+
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        masque = cv2.inRange(hsv, self.hsv_min, self.hsv_max)
+        masque = cv2.morphologyEx(masque, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+
+        contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            self._reset_suivi()
+            cv2.putText(frame_out, "CIBLE : PERDUE (HSV)", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
+            return False, 0.0, 0.0, 0.0, frame_out
+
+        c_max = max(contours, key=cv2.contourArea)
+        aire = float(cv2.contourArea(c_max))
+        if aire < 80.0:
+            self._reset_suivi()
+            return False, 0.0, 0.0, 0.0, frame_out
+
+        x, y, bw, bh = cv2.boundingRect(c_max)
+        cx, cy = x + bw // 2, y + bh // 2
+        err_x, err_y = self._erreurs_norm(cx, cy, w, h)
+
+        label = f"CIBLE HSV | err=({err_x:+.2f}, {err_y:+.2f}) | aire={int(aire)}"
+        self._annoter_cible(frame_out, x, y, bw, bh, cx, cy, label, (0, 255, 0))
+        return True, err_x, err_y, aire / aire_image, frame_out
+
 
 class ControleurRaie:
     """Pilote automatique combinant guidage visuel et regulation 6-DDL."""
