@@ -68,6 +68,7 @@ class DetecteurCibleVision:
         self.compteur_frames = 0
         self.passes_manquees = 0
         self.vx_norm = 0.0
+        self.vy_norm = 0.0
         self.taux_aire = 0.0
 
         # Etat du suivi optique inter-frames
@@ -90,6 +91,7 @@ class DetecteurCibleVision:
         self.points_suivi = None
         self.passes_manquees = 0
         self.vx_norm = 0.0
+        self.vy_norm = 0.0
         self.taux_aire = 0.0
 
     @staticmethod
@@ -123,17 +125,19 @@ class DetecteurCibleVision:
             gris, maxCorners=20, qualityLevel=0.05, minDistance=4, mask=masque
         )
 
-    def _maj_cinematique(self, cx, cy, aire, w):
-        """Met a jour vx_norm et taux_aire a partir de l'observation precedente."""
+    def _maj_cinematique(self, cx, cy, aire, w, h):
+        """Met a jour vx_norm, vy_norm et taux_aire a partir de l'observation precedente."""
         maintenant = time.perf_counter()
         if self.etat_prec is not None:
-            cx_p, _, aire_p, t_p = self.etat_prec
+            cx_p, cy_p, aire_p, t_p = self.etat_prec
             dt_obs = maintenant - t_p
             if dt_obs > 1e-3:
                 vx_inst = ((cx - cx_p) / (w * 0.5)) / dt_obs
+                vy_inst = ((cy - cy_p) / (h * 0.5)) / dt_obs
                 taux_inst = ((aire - aire_p) / max(aire_p, 1.0)) / dt_obs
                 # Lissage exponentiel doux pour filtrer le bruit d'estimation
                 self.vx_norm = 0.6 * self.vx_norm + 0.4 * vx_inst
+                self.vy_norm = 0.6 * self.vy_norm + 0.4 * vy_inst
                 self.taux_aire = 0.6 * self.taux_aire + 0.4 * taux_inst
         self.etat_prec = (cx, cy, aire, maintenant)
 
@@ -224,7 +228,7 @@ class DetecteurCibleVision:
         self.cible_precedente = (cx, cy)
         self.derniere_boite = meilleure
         self._init_points_optiques(gris, x, y, bw, bh)
-        self._maj_cinematique(cx, cy, aire, w)
+        self._maj_cinematique(cx, cy, aire, w, h)
 
         err_x, err_y = self._erreurs_norm(cx, cy, w, h)
         label = f"{espece} ({conf:.2f}) | {dt_ms:.0f}ms | dA={self.taux_aire:+.2f}/s | err=({err_x:+.2f}, {err_y:+.2f})"
@@ -273,7 +277,7 @@ class DetecteurCibleVision:
                 self.derniere_boite = [x, y, bw, bh, cx, cy, aire, conf, espece]
                 self.cible_precedente = (cx, cy)
                 self.points_suivi = bons_nouv.reshape(-1, 1, 2)
-                self._maj_cinematique(cx, cy, aire, w)
+                self._maj_cinematique(cx, cy, aire, w, h)
 
                 for pt in bons_nouv:
                     cv2.circle(frame_out, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1)
@@ -341,10 +345,13 @@ class ControleurRaie:
         prof_mes = etat_capteurs["profondeur"]
 
         if trouvee:
+            # Anticipation horizontale et verticale (horizon 0.20 s)
             err_x_pred = err_x + 0.20 * self.vision.vx_norm
+            err_y_pred = err_y + 0.20 * self.vision.vy_norm
+
             self.cap_cible = (yaw_mes - 0.65 * err_x_pred + np.pi) % (2.0 * np.pi) - np.pi
             self.profondeur_cible = float(np.clip(
-                prof_mes + 0.8 * err_y, 0.3, P.PROFONDEUR_BASSIN_M - 0.4
+                prof_mes + 0.8 * err_y_pred, 0.3, P.PROFONDEUR_BASSIN_M - 0.4
             ))
 
             if ratio_aire > P.VISION_RATIO_AIRE_PROCHE or self.vision.taux_aire > 0.35:
