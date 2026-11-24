@@ -158,6 +158,50 @@ class DetecteurCibleVision:
         self.gris_prec = gris
         return res
 
+    def _relancer_yolo_aire(self, frame_bgr):
+        """Relance YOLOv8 en zoomant sur l'aire autour de la derniere boite suivie."""
+        if self.derniere_boite is None:
+            return None
+
+        h, w = frame_bgr.shape[:2]
+        _, _, bw, bh, cx, cy, aire_prec, _, _ = self.derniere_boite
+        marge = max(bw, bh) * 1.5
+        ax1 = max(0, int(cx - marge))
+        ay1 = max(0, int(cy - marge))
+        ax2 = min(w, int(cx + marge))
+        ay2 = min(h, int(cy + marge))
+        if ax2 - ax1 < 32 or ay2 - ay1 < 32:
+            return None
+
+        aire_crop = frame_bgr[ay1:ay2, ax1:ax2]
+        res = self.modele.predict(
+            aire_crop,
+            conf=max(0.15, self.conf_seuil * 0.65),
+            imgsz=self.taille_entree,
+            verbose=False,
+        )[0]
+        if res.boxes is None:
+            return None
+
+        meilleure = None
+        meilleur_score = -1.0
+        for box in res.boxes:
+            bx1, by1, bx2, by2 = map(int, box.xyxy[0].tolist())
+            x1, y1, x2, y2 = bx1 + ax1, by1 + ay1, bx2 + ax1, by2 + ay1
+            nbw, nbh = float(x2 - x1), float(y2 - y1)
+            naire = max(1.0, nbw * nbh)
+            if naire > 2.5 * aire_prec or naire < 0.3 * aire_prec:
+                continue
+
+            conf = float(box.conf[0])
+            espece = self.modele.names.get(int(box.cls[0]), "fish")
+            ncx, ncy = x1 + nbw * 0.5, y1 + nbh * 0.5
+            score = naire * conf
+            if score > meilleur_score:
+                meilleur_score = score
+                meilleure = [float(x1), float(y1), nbw, nbh, ncx, ncy, naire, conf, espece]
+        return meilleure
+
     def _analyser_yolo(self, frame_bgr, gris):
         frame_out = frame_bgr.copy()
         h, w = frame_bgr.shape[:2]
@@ -214,9 +258,14 @@ class DetecteurCibleVision:
                     meilleur_score = score
                     meilleure = [float(x1), float(y1), bw, bh, cx, cy, aire, conf, espece]
 
+        if meilleure is None and self.derniere_boite is not None:
+            meilleure = self._relancer_yolo_aire(frame_bgr)
+
         if meilleure is None:
             self.passes_manquees += 1
-            if self.passes_manquees <= 2 and self.derniere_boite is not None:
+            pts_ok = (self.points_suivi is not None and len(self.points_suivi) >= 5)
+            max_graces = 8 if pts_ok else 2
+            if self.passes_manquees <= max_graces and self.derniere_boite is not None:
                 return self._suivre_entre_yolo(frame_bgr, gris)
             self._reset_suivi()
             cv2.putText(frame_out, f"CIBLE : PERDUE ({dt_ms:.0f} ms)", (10, 25),
