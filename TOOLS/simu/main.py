@@ -67,6 +67,8 @@ class Simulation:
     def lire_capteurs(self):
         return {
             "vx": self.sim.vel_body[0],
+            "roll": self.sim.att[0],
+            "pitch": self.sim.att[1],
             "yaw": self.sim.att[2],
             "profondeur": self.sim.profondeur,
             "humidite": self.humidite_sim,

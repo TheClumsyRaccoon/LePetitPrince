@@ -328,11 +328,13 @@ class ControleurRaie:
         self.pid_vitesse = Pid(*P.PID_VITESSE)
         self.pid_cap = Pid(*P.PID_CAP)
         self.pid_profondeur = Pid(*P.PID_PROF)
+        self.pid_roll = Pid(*P.PID_ROLL)
 
         self.mode_vision = True
         self.vitesse_cible = 0.55
         self.cap_cible = 0.0
         self.profondeur_cible = 1.8
+        self.roll_cible = 0.0
 
     def maj_consignes_vision(self, frame_bgr, etat_capteurs, dt):
         """Met a jour les consignes de cap, profondeur et vitesse depuis la camera."""
@@ -368,21 +370,32 @@ class ControleurRaie:
         return frame_annotee
 
     def calculer_commandes(self, etat_capteurs, dt):
-        """Calcule les commandes actionneurs : moteurs, elevons, ballast."""
+        """Calcule les commandes actionneurs : moteurs, elevons G/D, ballast."""
         if etat_capteurs["humidite"] > 70.0:
             return 0.0, 0.0, 0.35, 0.35, 0.0
 
-        u_vit = self.pid_vitesse.calculer(self.vitesse_cible, etat_capteurs["vx"], dt)
+        vx_mes = etat_capteurs["vx"]
+        u_vit = self.pid_vitesse.calculer(self.vitesse_cible, vx_mes, dt)
 
         err_cap = (self.cap_cible - etat_capteurs["yaw"] + np.pi) % (2.0 * np.pi) - np.pi
         u_cap = self.pid_cap.calculer(self.cap_cible, etat_capteurs["yaw"], dt, erreur_forcee=err_cap)
 
-        # Mixage differentiel : u_cap > 0 applique +u_cap a gauche et -u_cap a droite
+        # Mixage differentiel des propulseurs
         cmd_g = float(np.clip(u_vit + u_cap, -1.0, 1.0))
         cmd_d = float(np.clip(u_vit - u_cap, -1.0, 1.0))
 
+        # Profondeur (ballast + tangage symetrique des elevons)
         u_prof = self.pid_profondeur.calculer(self.profondeur_cible, etat_capteurs["profondeur"], dt)
         cible_ballast = float(np.clip(P.BALLAST_NEUTRE_ML + u_prof * 50.0, 0.0, 100.0))
-        cmd_elevon = float(np.clip(-u_prof * 0.35, -0.35, 0.35))
+        u_tangage = -u_prof * 0.35
 
-        return cmd_g, cmd_d, cmd_elevon, cmd_elevon, cible_ballast
+        # Roulis : inclinaison proportionnelle au virage et a la vitesse
+        facteur_vitesse = float(np.clip(abs(vx_mes) / 0.4, 0.0, 1.0))
+        self.roll_cible = float(np.clip(-0.75 * u_cap * facteur_vitesse, -0.45, 0.45))
+        u_roulis = self.pid_roll.calculer(self.roll_cible, etat_capteurs.get("roll", 0.0), dt)
+
+        # Mixage des elevons : symetrique pour le tangage, differentiel pour le roulis
+        cmd_elevon_g = float(np.clip(u_tangage + u_roulis, -0.45, 0.45))
+        cmd_elevon_d = float(np.clip(u_tangage - u_roulis, -0.45, 0.45))
+
+        return cmd_g, cmd_d, cmd_elevon_g, cmd_elevon_d, cible_ballast
