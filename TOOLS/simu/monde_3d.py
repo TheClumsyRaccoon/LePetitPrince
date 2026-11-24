@@ -5,7 +5,8 @@ from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (
     AmbientLight, DirectionalLight, Filename, Fog, Geom, GeomNode,
     GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter,
-    NodePath, PerspectiveLens, Texture, Vec3, Vec4, WindowProperties
+    NodePath, PerspectiveLens, TexGenAttrib, Texture, TextureStage,
+    Vec3, Vec4, WindowProperties
 )
 import config as P
 
@@ -104,35 +105,50 @@ class SceneSousMarine3D(ShowBase):
 
     def _construire_scene(self):
         fond_z = -P.PROFONDEUR_BASSIN_M
-        sol = creer_boite("fond", 120.0, 120.0, 0.2, (0.55, 0.52, 0.38, 1.0))
-        sol.setPos(0, 0, fond_z - 0.1)
-        sol.reparentTo(self.render)
+        dossier_monde = Path(__file__).resolve().parent / "assets" / "monde"
+        chemin_glb = dossier_monde / "monde.glb"
+        chemin_tex = dossier_monde / "monde.png"
 
-        # Quadrillage au fond pour répère visuel
-        for i in range(-18, 20, 2):
-            gx = creer_boite(f"gx_{i}", 38.0, 0.05, 0.02, (0.35, 0.38, 0.30, 1.0))
-            gx.setPos(0, i, fond_z + 0.01)
-            gx.reparentTo(self.render)
+        if chemin_glb.exists():
+            sol = self.loader.loadModel(Filename.fromOsSpecific(str(chemin_glb)))
+            sol.setTwoSided(True)
 
-            gy = creer_boite(f"gy_{i}", 0.05, 38.0, 0.02, (0.35, 0.38, 0.30, 1.0))
-            gy.setPos(i, 0, fond_z + 0.01)
-            gy.reparentTo(self.render)
+            # Emprise 60 x 60 m (1.5 * 40) et relief vertical de ~2.0 m (0.091 * 22)
+            sol.setScale(40.0, 40.0, 22.0)
+            p_min, p_max = sol.getTightBounds()
+
+            # Centre en X/Y et cale le point le plus bas au fond du bassin (fond_z)
+            sol.setPos(
+                -(p_min.x + p_max.x) * 0.5,
+                -(p_min.y + p_max.y) * 0.5,
+                fond_z - p_min.z,
+            )
+
+            if chemin_tex.exists():
+                sol.clearMaterial()
+                sol.clearTexture()
+                tex = self.loader.loadTexture(Filename.fromOsSpecific(str(chemin_tex)))
+                tex.setWrapU(Texture.WMClamp)
+                tex.setWrapV(Texture.WMClamp)
+                tex.setMagfilter(Texture.FTLinearMipmapLinear)
+                tex.setMinfilter(Texture.FTLinearMipmapLinear)
+
+                ts = TextureStage.getDefault()
+                sol.setTexGen(ts, TexGenAttrib.MWorldPosition)
+                # Ramene les coordonnees monde [-30, +30] m dans l'intervalle UV [0, 1]
+                sol.setTexOffset(ts, 0.5, 0.5)
+                sol.setTexScale(ts, 1.0 / 60.0, 1.0 / 60.0)
+                sol.setTexture(ts, tex, 1)
+
+            sol.reparentTo(self.render)
+        else:
+            sol = creer_boite("fond", 120.0, 120.0, 0.2, (0.55, 0.52, 0.38, 1.0))
+            sol.setPos(0, 0, fond_z - 0.1)
+            sol.reparentTo(self.render)
 
         surface = creer_boite("surface", 120.0, 120.0, 0.02, (0.45, 0.78, 0.95, 0.35))
         surface.setTransparency(True)
         surface.reparentTo(self.render)
-
-        # Rochers et bouée dans le bassin
-        obstacles = [
-            (4.5,  2.5, fond_z + 1.2, 1.4, 1.4, 2.4, (0.28, 0.32, 0.35, 1.0)),
-            (7.0, -3.0, fond_z + 1.5, 1.8, 1.2, 3.0, (0.25, 0.30, 0.33, 1.0)),
-            (-4.0, 4.0, fond_z + 1.0, 1.5, 1.5, 2.0, (0.30, 0.33, 0.36, 1.0)),
-            (2.0, -4.5, -2.0,         0.35, 0.35, 0.35, (0.9, 0.2, 0.2, 1.0)),
-        ]
-        for idx, (ox, oy, oz, sx, sy, sz, col) in enumerate(obstacles):
-            obs = creer_boite(f"obs_{idx}", sx, sy, sz, col)
-            obs.setPos(ox, oy, oz)
-            obs.reparentTo(self.render)
 
     def _construire_raie(self):
         """Assemble la raie Mobula alignee sur +Y (axe avant natif Panda3D)."""
@@ -183,7 +199,7 @@ class SceneSousMarine3D(ShowBase):
         dossier_assets = Path(__file__).resolve().parent / "assets"
         fichiers_glb = sorted(dossier_assets.glob("*.glb")) if dossier_assets.exists() else []
 
-        nb_poissons = int(self.rng.integers(max(400, len(fichiers_glb)), max(600, len(fichiers_glb) + 5)))
+        nb_poissons = int(self.rng.integers(max(140, len(fichiers_glb)), max(200, len(fichiers_glb) + 5)))
 
         for idx in range(nb_poissons):
             racine = self.render.attachNewNode(f"Poisson_{idx}")
