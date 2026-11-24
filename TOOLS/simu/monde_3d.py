@@ -202,6 +202,8 @@ class SceneSousMarine3D(ShowBase):
                 modele.setScale(echelle)
                 centre = (p_min + p_max) * 0.5 * echelle
                 modele.setPos(-centre)
+                if taille.x > taille.y:
+                    modele.setH(90.0)
             else:
                 corps = creer_boite(f"p_corps_{idx}", 0.10, 0.34, 0.14, (1.0, 0.42, 0.05, 1.0))
                 corps.reparentTo(racine)
