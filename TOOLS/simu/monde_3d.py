@@ -104,7 +104,7 @@ class SceneSousMarine3D(ShowBase):
 
     def _construire_scene(self):
         fond_z = -P.PROFONDEUR_BASSIN_M
-        sol = creer_boite("fond", 40.0, 40.0, 0.2, (0.55, 0.52, 0.38, 1.0))
+        sol = creer_boite("fond", 120.0, 120.0, 0.2, (0.55, 0.52, 0.38, 1.0))
         sol.setPos(0, 0, fond_z - 0.1)
         sol.reparentTo(self.render)
 
@@ -118,7 +118,7 @@ class SceneSousMarine3D(ShowBase):
             gy.setPos(i, 0, fond_z + 0.01)
             gy.reparentTo(self.render)
 
-        surface = creer_boite("surface", 40.0, 40.0, 0.02, (0.45, 0.78, 0.95, 0.35))
+        surface = creer_boite("surface", 120.0, 120.0, 0.02, (0.45, 0.78, 0.95, 0.35))
         surface.setTransparency(True)
         surface.reparentTo(self.render)
 
@@ -242,6 +242,7 @@ class SceneSousMarine3D(ShowBase):
         self.buf_embarque = self.win.makeTextureBuffer(
             "CamEmbarquee", self.cam_w, self.cam_h, self.tex_embarquee, to_ram=True
         )
+        self.buf_embarque.setClearColor(Vec4(0.04, 0.26, 0.34, 1.0))
         self.buf_embarque.setSort(-100)
 
         self.cam_robot = self.makeCamera(self.buf_embarque)
@@ -274,6 +275,7 @@ class SceneSousMarine3D(ShowBase):
             frame = cv2.addWeighted(frame, 1.0 - 0.35 * niveau, floue, 0.35 * niveau, 0)
             voile = np.full_like(frame, (87, 66, 10), dtype=np.uint8)
             frame = cv2.addWeighted(frame, 1.0 - 0.15 * niveau, voile, 0.15 * niveau, 0)
+
         return frame
 
     def maj(self, sim, dt):
