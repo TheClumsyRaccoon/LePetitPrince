@@ -1,4 +1,5 @@
 from pathlib import Path
+import cv2
 import numpy as np
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (
@@ -59,11 +60,11 @@ class SceneSousMarine3D(ShowBase):
         self.win.requestProperties(props)
 
         # Turbidité
-        couleur_eau = Vec4(0.03, 0.22, 0.36, 1.0)
+        couleur_eau = Vec4(0.04, 0.26, 0.34, 1.0)
         self.setBackgroundColor(couleur_eau)
         brouillard = Fog("EauFog")
-        brouillard.setColor(0.03, 0.22, 0.36)
-        brouillard.setExpDensity(0.055)
+        brouillard.setColor(0.04, 0.26, 0.34)
+        brouillard.setExpDensity(P.TURBIDITE)
         self.render.setFog(brouillard)
 
         self._configurer_lumiere()
@@ -107,7 +108,7 @@ class SceneSousMarine3D(ShowBase):
         sol.setPos(0, 0, fond_z - 0.1)
         sol.reparentTo(self.render)
 
-        # Quadrillage au fond pour repere visuel
+        # Quadrillage au fond pour répère visuel
         for i in range(-18, 20, 2):
             gx = creer_boite(f"gx_{i}", 38.0, 0.05, 0.02, (0.35, 0.38, 0.30, 1.0))
             gx.setPos(0, i, fond_z + 0.01)
@@ -121,7 +122,7 @@ class SceneSousMarine3D(ShowBase):
         surface.setTransparency(True)
         surface.reparentTo(self.render)
 
-        # Rochers et bouee dans le bassin
+        # Rochers et bouée dans le bassin
         obstacles = [
             (4.5,  2.5, fond_z + 1.2, 1.4, 1.4, 2.4, (0.28, 0.32, 0.35, 1.0)),
             (7.0, -3.0, fond_z + 1.5, 1.8, 1.2, 3.0, (0.25, 0.30, 0.33, 1.0)),
@@ -175,20 +176,20 @@ class SceneSousMarine3D(ShowBase):
         prop_d.reparentTo(self.robot_np)
 
     def _construire_cible(self):
-        """Genere un nombre aleatoire de poissons a partir de tous les modeles dans assets/."""
+        """Gen un nombre aléatoire de poissons à partir des modèles 3d dans assets"""
         self.rng = np.random.default_rng()
         self.poissons = []
 
         dossier_assets = Path(__file__).resolve().parent / "assets"
         fichiers_glb = sorted(dossier_assets.glob("*.glb")) if dossier_assets.exists() else []
 
-        nb_poissons = int(self.rng.integers(max(220, len(fichiers_glb)), max(280, len(fichiers_glb) + 5)))
+        nb_poissons = int(self.rng.integers(max(400, len(fichiers_glb)), max(600, len(fichiers_glb) + 5)))
 
         for idx in range(nb_poissons):
             racine = self.render.attachNewNode(f"Poisson_{idx}")
 
             if fichiers_glb:
-                # Garantit que chaque modele .glb de assets/ est utilise au moins une fois
+                # Garantit que chaque modele .glb de assets est utilisé au moins une fois
                 fichier = fichiers_glb[idx] if idx < len(fichiers_glb) else self.rng.choice(fichiers_glb)
                 modele = self.loader.loadModel(Filename.fromOsSpecific(str(fichier)))
                 modele.reparentTo(racine)
@@ -234,7 +235,7 @@ class SceneSousMarine3D(ShowBase):
             self.cible_np = self.poissons[0]["np"]
 
     def _configurer_camera_embarquee(self):
-        """Cree une camera virtuelle hors-ecran fixee sur le nez de la raie (+Y)."""
+        """Crée une camera virtuelle hors-ecran fixee sur le nez de la raie (+Y)."""
         self.cam_w = P.CAM_LARGEUR
         self.cam_h = P.CAM_HAUTEUR
         self.tex_embarquee = Texture()
@@ -265,7 +266,15 @@ class SceneSousMarine3D(ShowBase):
             return np.zeros((self.cam_h, self.cam_w, 3), dtype=np.uint8)
 
         img = arr.reshape((self.cam_h, self.cam_w, 4))
-        return np.flipud(img[:, :, :3]).copy()
+        frame = np.flipud(img[:, :, :3]).copy()
+
+        if P.TURBIDITE > 0.0:
+            niveau = float(np.clip(P.TURBIDITE / 0.30, 0.0, 1.0))
+            floue = cv2.GaussianBlur(frame, (5, 5), 0)
+            frame = cv2.addWeighted(frame, 1.0 - 0.35 * niveau, floue, 0.35 * niveau, 0)
+            voile = np.full_like(frame, (87, 66, 10), dtype=np.uint8)
+            frame = cv2.addWeighted(frame, 1.0 - 0.15 * niveau, voile, 0.15 * niveau, 0)
+        return frame
 
     def maj(self, sim, dt):
         self.t_scene += dt
@@ -275,11 +284,11 @@ class SceneSousMarine3D(ShowBase):
         roll_deg, pitch_deg, yaw_deg = np.degrees(sim.att)
         self.robot_np.setHpr(yaw_deg - 90.0, -pitch_deg, roll_deg)
 
-        # Braquage visuel des elevons
+        # Orientation visuel des élevons
         self.elevon_g_np.setP(-np.degrees(sim.elevon_g))
         self.elevon_d_np.setP(-np.degrees(sim.elevon_d))
 
-        # Deplacement aleatoire des poissons dans le bassin
+        # Déplacement aléatoire des poissons dans le bassin
         z_min = -P.PROFONDEUR_BASSIN_M + 0.5
         z_max = -0.5
         for p in self.poissons:
@@ -290,7 +299,7 @@ class SceneSousMarine3D(ShowBase):
                 p["vz"] = float(self.rng.uniform(-0.18, 0.18))
                 p["timer_virage"] = float(self.rng.uniform(1.5, 4.5))
 
-            # Demi-tour doux a l'approche des parois du bassin
+            # Demi-tour à l'approche des parois du bassin
             if abs(p["pos"][0]) > 15.0 or abs(p["pos"][1]) > 15.0:
                 cap_centre = np.arctan2(-p["pos"][1], -p["pos"][0])
                 err = (cap_centre - p["cap"] + np.pi) % (2.0 * np.pi) - np.pi

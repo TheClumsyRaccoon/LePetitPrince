@@ -59,3 +59,4 @@ VISION_RATIO_AIRE_PROCHE = 0.06  # ~6% de l'image (~18 000 px en 640x480)
 DT_PHYSIQUE_S = 0.005               # Pas de calcul (200 Hz)
 PROFONDEUR_BASSIN_M = 6.0
 COURANT_MARIN_TEST = (0.0, 0.22, 0.0)
+P.TURBIDITE = 0.2
