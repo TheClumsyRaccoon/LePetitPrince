@@ -6,6 +6,7 @@ import config as P
 from physique import Modele6DDL
 from monde_3d import SceneSousMarine3D
 from controleur import ControleurRaie
+from slam import SlamVisuelInertiel
 
 
 class Simulation:
@@ -16,6 +17,7 @@ class Simulation:
         self.sim = Modele6DDL()
         self.scene = SceneSousMarine3D()
         self.ctrl = ControleurRaie()
+        self.slam = SlamVisuelInertiel(taille_carte_px=450, emprise_carte_m=60.0)
 
         # Cadences
         self.dt_phys = P.DT_PHYSIQUE_S              #(200 Hz)
@@ -57,6 +59,7 @@ class Simulation:
     def reinitialiser(self):
         self.sim = Modele6DDL()
         self.ctrl = ControleurRaie()
+        self.slam.reset(self.sim.pos)
         self.accum_phys = 0.0
         self.accum_vision = 0.0
         self.n_pas = 0
@@ -119,15 +122,21 @@ class Simulation:
         # 2. Rendu 3D Panda3D
         self.scene.maj(self.sim, dt)
 
-        # 3. Boucle vision OpenCV (25Hz)
+        # 3. Boucle vision OpenCV (25Hz) + SLAM
         self.accum_vision += dt
         if self.accum_vision >= self.dt_vision:
             frame_bgr = self.scene.capturer_frame_bgr()
-            self.frame_annotee = self.ctrl.maj_consignes_vision(
-                frame_bgr, self.lire_capteurs(), self.dt_vision
-            )
-            self._incruster_data(self.frame_annotee)
-            cv2.imshow("Vision Embarquee - Le Petit Prince", self.frame_annotee)
+            capteurs = self.lire_capteurs()
+            if frame_bgr is not None:
+                self.frame_annotee = self.ctrl.maj_consignes_vision(
+                    frame_bgr, capteurs, self.dt_vision
+                )
+                self._incruster_data(self.frame_annotee)
+                cv2.imshow("Vision Embarquee - Le Petit Prince", self.frame_annotee)
+
+                _, carte_slam = self.slam.maj(frame_bgr, capteurs, self.sim.pos)
+                cv2.imshow("Carte SLAM 2D - Le Petit Prince", carte_slam)
+
             self.accum_vision -= self.dt_vision
 
         # 4. Gestion shortcut fenètre OpenCV
