@@ -4,7 +4,7 @@ import config as P
 
 
 class SlamVisuelInertiel:
-    """Premiere version slam ORB + carte 2D."""
+    """oodometrie visuelle ORB avec compensation de rotation IMU et carte 2D."""
 
     def __init__(self, taille_carte_px=450, emprise_carte_m=60.0):
         self.taille_px = taille_carte_px
@@ -16,6 +16,7 @@ class SlamVisuelInertiel:
 
         self.kp_prec = None
         self.des_prec = None
+        self.att_prec = None
         self.pos_est = np.array([0.0, 0.0], dtype=float)
         self.init_ok = False
 
@@ -28,6 +29,7 @@ class SlamVisuelInertiel:
     def reset(self, pos_reelle_xy=None):
         self.kp_prec = None
         self.des_prec = None
+        self.att_prec = None
         self.pos_est = np.array(pos_reelle_xy[:2], dtype=float) if pos_reelle_xy is not None else np.zeros(2)
         self.traj_est.clear()
         self.traj_reelle.clear()
@@ -46,29 +48,54 @@ class SlamVisuelInertiel:
             self.init_ok = True
 
         gris = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        kp, des = self.orb.detectAndCompute(gris, None)
+        # Limite l'analyse aux deux tiers inferieurs (decor marin)
+        masque = np.zeros_like(gris)
+        masque[int(h * 0.35):, :] = 255
+        kp, des = self.orb.detectAndCompute(gris, masque)
 
+        pitch = etat_capteurs.get("pitch", 0.0)
         yaw = etat_capteurs["yaw"]
         prof = etat_capteurs["profondeur"]
         altitude_fond = float(np.clip(P.PROFONDEUR_BASSIN_M - prof, 0.6, 5.5))
 
         nb_pts = 0
-        if self.des_prec is not None and des is not None and len(des) >= 10:
-            matches = sorted(self.matcher.match(self.des_prec, des), key=lambda m: m.distance)[:60]
+        if (
+            self.des_prec is not None
+            and des is not None
+            and self.att_prec is not None
+            and len(des) >= 10
+        ):
+            matches = [m for m in self.matcher.match(self.des_prec, des) if m.distance < 35]
+            matches = sorted(matches, key=lambda m: m.distance)[:60]
+
             if len(matches) >= 8:
                 pts_anc = np.float32([self.kp_prec[m.queryIdx].pt for m in matches])
                 pts_nouv = np.float32([kp[m.trainIdx].pt for m in matches])
                 du, dv = np.median(pts_nouv - pts_anc, axis=0)
                 nb_pts = len(matches)
 
-                dx_robot = (dv / self.focale_px) * altitude_fond
-                dy_robot = -(du / self.focale_px) * altitude_fond
+                # Compensation de la rotation propre de la camera (evite la derive en virage)
+                dpitch = pitch - self.att_prec[0]
+                dyaw = (yaw - self.att_prec[1] + np.pi) % (2.0 * np.pi) - np.pi
+
+                du_trans = du - (dyaw * self.focale_px)
+                dv_trans = dv - (dpitch * self.focale_px)
+
+                dx_robot = (dv_trans / self.focale_px) * altitude_fond
+                dy_robot = -(du_trans / self.focale_px) * altitude_fond
+
                 c, s = np.cos(yaw), np.sin(yaw)
-                self.pos_est[0] += c * dx_robot - s * dy_robot
-                self.pos_est[1] += s * dx_robot + c * dy_robot
+                dx_monde = c * dx_robot - s * dy_robot
+                dy_monde = s * dx_robot + c * dy_robot
+
+                if np.hypot(dx_monde, dy_monde) < 0.35:
+                    self.pos_est[0] += dx_monde
+                    self.pos_est[1] += dy_monde
 
         self.kp_prec = kp
         self.des_prec = des
+        self.att_prec = (pitch, yaw)
+
         self.traj_est.append(self.pos_est.copy())
         self.traj_reelle.append(np.array(pos_reelle_xyz[:2], dtype=float))
 
