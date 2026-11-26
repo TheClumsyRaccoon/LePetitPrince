@@ -4,12 +4,15 @@ import config as P
 
 
 class SlamVisuelInertiel:
-    """oodometrie visuelle ORB avec Lucas Kanade + proj au sol et carte 2D."""
+    """Odometrie visuelle par projection sol (VIO) avec CLAHE et rejet des cibles mobiles."""
 
-    def __init__(self, taille_carte_px=420, emprise_carte_m=60.0):
+    def __init__(self, taille_carte_px=420, emprise_carte_m=60.0, inclinaison_cam_deg=18.0):
         self.taille_px = taille_carte_px
         self.emprise_m = emprise_carte_m
         self.echelle_px_m = taille_carte_px / emprise_carte_m
+        self.inclinaison_cam_rad = np.radians(inclinaison_cam_deg)
+
+        self.clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
 
         self.gris_prec = None
         self.pts_prec = None
@@ -17,6 +20,8 @@ class SlamVisuelInertiel:
         self.prof_prec = None
 
         self.pos_est = np.array([0.0, 0.0], dtype=float)
+        self.vx_filtre = 0.0
+        self.vy_filtre = 0.0
         self.init_ok = False
 
         self.traj_est = []
@@ -29,6 +34,8 @@ class SlamVisuelInertiel:
         self.pts_prec = None
         self.att_prec = None
         self.prof_prec = None
+        self.vx_filtre = 0.0
+        self.vy_filtre = 0.0
         if pos_reelle_xy is not None:
             self.pos_est = np.array(pos_reelle_xy[:2], dtype=float)
         else:
@@ -47,8 +54,8 @@ class SlamVisuelInertiel:
         )
 
     @staticmethod
-    def _projeter_pixels_au_sol(pts_uv, w, h, focale_px, roll, pitch, yaw, altitude_fond):
-        """Projete des pixels (u, v) sur le plan du sol situe a 'altitude_fond' sous la camera."""
+    def _projeter_pixels_au_sol(pts_uv, w, h, focale_px, roll, pitch_down, yaw, altitude_fond):
+        """Projete des pixels (u, v) sur le plan du sol situe a `altitude_fond` sous la camera."""
         if len(pts_uv) == 0:
             return np.empty((0, 2), dtype=float), np.zeros(0, dtype=bool)
 
@@ -59,7 +66,7 @@ class SlamVisuelInertiel:
         rays_body = np.stack([z_opt, -x_opt, -y_opt], axis=1)
 
         cr, sr = np.cos(roll), np.sin(roll)
-        cp, sp = np.cos(pitch), np.sin(pitch)
+        cp, sp = np.cos(pitch_down), np.sin(pitch_down)
         cy, sy = np.cos(yaw), np.sin(yaw)
 
         Rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
@@ -81,17 +88,53 @@ class SlamVisuelInertiel:
 
         return proj_xy, valides
 
-    def _detecter_points_sol(self, gris, w, h):
-        masque = np.zeros_like(gris)
-        y_debut = int(h * 0.35)
+    @staticmethod
+    def _masquer_boites(masque, w, h, boites):
+        if not boites:
+            return
+        for b in boites:
+            if b is None:
+                continue
+            bx, by, bbw, bbh = b[:4]
+            x1 = max(0, int(bx - 22))
+            y1 = max(0, int(by - 22))
+            x2 = min(w, int(bx + bbw + 22))
+            y2 = min(h, int(by + bbh + 22))
+            masque[y1:y2, x1:x2] = 0
+
+    def _detecter_points_sol(self, gris_clahe, w, h, boites_exclues):
+        """Detecte des coins repartis en grille sur le sol en excluant les poissons."""
+        masque = np.zeros_like(gris_clahe)
+        y_debut = int(h * 0.38)
         masque[y_debut:h - 10, 10:w - 10] = 255
-        return cv2.goodFeaturesToTrack(
-            gris, maxCorners=80, qualityLevel=0.012, minDistance=16, mask=masque
-        )
+
+        self._masquer_boites(masque, w, h, boites_exclues)
+
+        tous_pts = []
+        nb_cols, nb_rows = 5, 3
+        pas_x = (w - 20) // nb_cols
+        pas_y = (h - 10 - y_debut) // nb_rows
+
+        for r in range(nb_rows):
+            for c in range(nb_cols):
+                x0 = 10 + c * pas_x
+                y0 = y_debut + r * pas_y
+                masque_cellule = np.zeros_like(masque)
+                masque_cellule[y0:y0 + pas_y, x0:x0 + pas_x] = masque[y0:y0 + pas_y, x0:x0 + pas_x]
+
+                pts_cell = cv2.goodFeaturesToTrack(
+                    gris_clahe, maxCorners=8, qualityLevel=0.008, minDistance=14, mask=masque_cellule
+                )
+                if pts_cell is not None:
+                    tous_pts.append(pts_cell)
+
+        if not tous_pts:
+            return None
+        return np.vstack(tous_pts)
 
     @staticmethod
     def _dessiner_reperes_hud(frame, pts_anc, pts_nouv):
-        """Affiche des viseurs carrés bleus avec vecteur sur la video."""
+        """Affiche des viseurs carres cyan uniquement sur les points fixes du sol."""
         for (u1, v1), (u2, v2) in zip(pts_anc, pts_nouv):
             iu1, iv1 = int(u1), int(v1)
             iu2, iv2 = int(u2), int(v2)
@@ -100,8 +143,8 @@ class SlamVisuelInertiel:
             if np.hypot(iu2 - iu1, iv2 - iv1) >= 1.0:
                 cv2.line(frame, (iu1, iv1), (iu2, iv2), (255, 180, 0), 1)
 
-    def maj(self, frame_bgr, etat_capteurs, pos_reelle_xyz, frame_visu=None):
-        """MAJ le SLAM et retourne (pos_est, carte_reelle, carte_slam, frame_out)."""
+    def maj(self, frame_bgr, etat_capteurs, pos_reelle_xyz, frame_visu=None, boites_exclues=None):
+        """Met a jour l'odometrie sol avec CLAHE et filtrage rigide anti-poissons."""
         h, w = frame_bgr.shape[:2]
         fov_rad = np.radians(P.CAM_FOV_DEG)
         focale_px = (w * 0.5) / np.tan(fov_rad * 0.5)
@@ -110,16 +153,17 @@ class SlamVisuelInertiel:
             self.pos_est = np.array(pos_reelle_xyz[:2], dtype=float)
             self.init_ok = True
 
-        gris = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gris_brut = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gris = self.clahe.apply(gris_brut)
         frame_out = frame_visu if frame_visu is not None else frame_bgr.copy()
 
         roll = etat_capteurs.get("roll", 0.0)
-        pitch = -etat_capteurs.get("pitch", 0.0)
+        pitch_down = -etat_capteurs.get("pitch", 0.0) + self.inclinaison_cam_rad
         yaw = etat_capteurs["yaw"]
         prof = etat_capteurs["profondeur"]
         altitude_fond = float(np.clip(P.PROFONDEUR_BASSIN_M - prof, 0.6, 5.8))
 
-        nb_pts = 0
+        nb_amers = 0
         if (
             self.gris_prec is not None
             and self.pts_prec is not None
@@ -134,50 +178,79 @@ class SlamVisuelInertiel:
                 uv_anc = self.pts_prec[ok].reshape(-1, 2)
                 uv_nouv = pts_nouv[ok].reshape(-1, 2)
 
-                r_p, p_p, y_p = self.att_prec
-                sol_anc, val_anc = self._projeter_pixels_au_sol(
-                    uv_anc, w, h, focale_px, r_p, p_p, y_p, self.prof_prec
-                )
-                sol_nouv, val_nouv = self._projeter_pixels_au_sol(
-                    uv_nouv, w, h, focale_px, roll, pitch, yaw, altitude_fond
-                )
-
-                val = val_anc & val_nouv
-                if np.sum(val) >= 5:
-                    dpos = sol_anc[val] - sol_nouv[val]
-                    dx_monde = float(np.median(dpos[:, 0]))
-                    dy_monde = float(np.median(dpos[:, 1]))
-
-                    residus = np.hypot(dpos[:, 0] - dx_monde, dpos[:, 1] - dy_monde)
-                    inliers = residus < 0.35
-                    if np.sum(inliers) >= 4 and np.hypot(dx_monde, dy_monde) < 0.30:
-                        self.pos_est[0] += dx_monde
-                        self.pos_est[1] += dy_monde
-                        nb_pts = int(np.sum(inliers))
-                        self._dessiner_reperes_hud(
-                            frame_out, uv_anc[val][inliers], uv_nouv[val][inliers]
+                # Purge tout point suivi entrant dans une boite poisson
+                garder = np.ones(len(uv_nouv), dtype=bool)
+                if boites_exclues:
+                    for b in boites_exclues:
+                        if b is None:
+                            continue
+                        bx, by, bbw, bbh = b[:4]
+                        dans_boite = (
+                            (uv_nouv[:, 0] >= bx - 22) & (uv_nouv[:, 0] <= bx + bbw + 22)
+                            & (uv_nouv[:, 1] >= by - 22) & (uv_nouv[:, 1] <= by + bbh + 22)
                         )
+                        garder &= ~dans_boite
+
+                uv_anc = uv_anc[garder]
+                uv_nouv = uv_nouv[garder]
+
+                if len(uv_nouv) >= 6:
+                    r_p, p_p, y_p = self.att_prec
+                    sol_anc, val_anc = self._projeter_pixels_au_sol(
+                        uv_anc, w, h, focale_px, r_p, p_p, y_p, self.prof_prec
+                    )
+                    sol_nouv, val_nouv = self._projeter_pixels_au_sol(
+                        uv_nouv, w, h, focale_px, roll, pitch_down, yaw, altitude_fond
+                    )
+
+                    val = val_anc & val_nouv
+                    if np.sum(val) >= 5:
+                        dpos = sol_anc[val] - sol_nouv[val]
+                        dx_med = float(np.median(dpos[:, 0]))
+                        dy_med = float(np.median(dpos[:, 1]))
+
+                        # Consensus rigide serre pour rejeter les poissons non detectes par YOLO
+                        residus = np.hypot(dpos[:, 0] - dx_med, dpos[:, 1] - dy_med)
+                        inliers = residus < 0.15
+
+                        if np.sum(inliers) >= 5:
+                            dx_monde = float(np.mean(dpos[inliers, 0]))
+                            dy_monde = float(np.mean(dpos[inliers, 1]))
+
+                            if np.hypot(dx_monde, dy_monde) < 0.25:
+                                self.vx_filtre = 0.65 * self.vx_filtre + 0.35 * dx_monde
+                                self.vy_filtre = 0.65 * self.vy_filtre + 0.35 * dy_monde
+                                self.pos_est[0] += self.vx_filtre
+                                self.pos_est[1] += self.vy_filtre
+                                nb_amers = int(np.sum(inliers))
+
+                                self._dessiner_reperes_hud(
+                                    frame_out, uv_anc[val][inliers], uv_nouv[val][inliers]
+                                )
+
+                                uv_anc = uv_anc[val][inliers]
+                                uv_nouv = uv_nouv[val][inliers]
 
                 dans_cadre = (
                     (uv_nouv[:, 0] > 10) & (uv_nouv[:, 0] < w - 10)
-                    & (uv_nouv[:, 1] > int(h * 0.35)) & (uv_nouv[:, 1] < h - 10)
+                    & (uv_nouv[:, 1] > int(h * 0.38)) & (uv_nouv[:, 1] < h - 10)
                 )
                 pts_restants = uv_nouv[dans_cadre].reshape(-1, 1, 2)
-                if len(pts_restants) < 45:
-                    nouveaux = self._detecter_points_sol(gris, w, h)
+                if len(pts_restants) < 55:
+                    nouveaux = self._detecter_points_sol(gris, w, h, boites_exclues)
                     if nouveaux is not None:
                         pts_restants = (
                             np.vstack([pts_restants, nouveaux]) if len(pts_restants) > 0 else nouveaux
                         )
-                self.pts_prec = pts_restants[:80] if len(pts_restants) > 0 else None
+                self.pts_prec = pts_restants[:110] if len(pts_restants) > 0 else None
             else:
-                self.pts_prec = self._detecter_points_sol(gris, w, h)
+                self.pts_prec = self._detecter_points_sol(gris, w, h, boites_exclues)
         else:
-            self.pts_prec = self._detecter_points_sol(gris, w, h)
+            self.pts_prec = self._detecter_points_sol(gris, w, h, boites_exclues)
 
         cv2.putText(
             frame_out,
-            f"SLAM LK: {nb_pts} pts",
+            f"SLAM SOL: {nb_amers} pts",
             (w - 155, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
@@ -186,7 +259,7 @@ class SlamVisuelInertiel:
         )
 
         self.gris_prec = gris
-        self.att_prec = (roll, pitch, yaw)
+        self.att_prec = (roll, pitch_down, yaw)
         self.prof_prec = altitude_fond
 
         self.traj_est.append(self.pos_est.copy())
@@ -217,7 +290,7 @@ class SlamVisuelInertiel:
             yaw,
             self.carte_exp_slam,
             couleur=(255, 210, 0),
-            titre=f"POSITION SLAM | Pts={nb_pts} | Derive={erreur_m:.2f}m",
+            titre=f"POSITION SLAM | Pts={nb_amers} | Derive={erreur_m:.2f}m",
             sous_titre=f"Estimee X={self.pos_est[0]:+.1f}m Y={self.pos_est[1]:+.1f}m",
         )
         return self.pos_est.copy(), carte_reelle, carte_slam, frame_out

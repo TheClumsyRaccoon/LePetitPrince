@@ -131,11 +131,16 @@ class Simulation:
                 self.frame_annotee = self.ctrl.maj_consignes_vision(
                     frame_bgr, capteurs, self.dt_vision
                 )
+                boites_poissons = list(getattr(self.ctrl.vision, "toutes_boites", []))
+                if self.ctrl.vision.derniere_boite is not None:
+                    boites_poissons.append(self.ctrl.vision.derniere_boite)
+
                 _, carte_reelle, carte_slam, self.frame_annotee = self.slam.maj(
                     frame_bgr,
                     capteurs,
                     self.sim.pos,
                     frame_visu=self.frame_annotee,
+                    boites_exclues=boites_poissons,
                 )
                 self._incruster_data(self.frame_annotee)
                 cv2.imshow("Vision Embarquee - Le Petit Prince", self.frame_annotee)
@@ -143,7 +148,7 @@ class Simulation:
                 cv2.imshow("Position SLAM - Le Petit Prince", carte_slam)
 
             self.accum_vision -= self.dt_vision
-
+            
         # 4. Gestion shortcut fenètre OpenCV
         if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
             cv2.destroyAllWindows()
