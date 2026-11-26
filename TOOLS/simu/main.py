@@ -131,11 +131,16 @@ class Simulation:
                 self.frame_annotee = self.ctrl.maj_consignes_vision(
                     frame_bgr, capteurs, self.dt_vision
                 )
+                _, carte_reelle, carte_slam, self.frame_annotee = self.slam.maj(
+                    frame_bgr,
+                    capteurs,
+                    self.sim.pos,
+                    frame_visu=self.frame_annotee,
+                )
                 self._incruster_data(self.frame_annotee)
                 cv2.imshow("Vision Embarquee - Le Petit Prince", self.frame_annotee)
-
-                _, carte_slam = self.slam.maj(frame_bgr, capteurs, self.sim.pos)
-                cv2.imshow("Carte SLAM 2D - Le Petit Prince", carte_slam)
+                cv2.imshow("Position Reelle - Le Petit Prince", carte_reelle)
+                cv2.imshow("Position SLAM - Le Petit Prince", carte_slam)
 
             self.accum_vision -= self.dt_vision
 
